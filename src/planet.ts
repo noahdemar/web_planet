@@ -108,3 +108,48 @@ export function edgeLengthAt(level: number): number {
 export function gsdAt(level: number): number {
   return edgeLengthAt(level) / 256;
 }
+
+/* ── Vegetation (SPEC.md §8) ─────────────────────────────────────────── */
+
+/**
+ * Quadtree level the scatter runs on. L14 → 562.8 m tiles, which is small
+ * enough that a tile's instances share a coherent LOD band and large enough
+ * that a 1 km view radius needs only ~14 of them.
+ */
+export const VEG_LEVEL = 14;
+
+/** Scatter cells per tile edge. 128 → 4.4 m spacing ≈ 520 stems/ha. */
+export const VEG_CELLS = 128;
+
+/** Tiles resident at once. Sizes the tile-parameter buffer. */
+export const MAX_VEG_TILES = 24;
+
+/** Distance beyond which canopy becomes a terrain material, not objects. */
+export const VEG_RANGE = 1100;
+
+/**
+ * Representation bands. LOD here changes what an instance *is*, not how many
+ * triangles it has — decimation is the wrong tool for aggregate geometry
+ * (SPEC.md §8, "Do we need Nanite?").
+ */
+export const VEG_BANDS = [
+  { name: 'near', maxDist: 45 },
+  { name: 'mid', maxDist: 220 },
+  { name: 'far', maxDist: VEG_RANGE },
+] as const;
+
+/**
+ * Instances per band. Equal across bands on purpose: it makes the shader's
+ * base offset plain arithmetic (`band * capacity`) instead of a branch chain.
+ *
+ * Only the far band ever approaches this — it covers the 220–1100 m annulus,
+ * which is 96% of the scattered area. At 400k per band the instance buffer is
+ * 19 MB, which is nothing, and the cap stops being what limits the forest.
+ */
+export const VEG_BAND_CAPACITY = 400_000;
+export const VEG_CAPACITY = VEG_BAND_CAPACITY * VEG_BANDS.length;
+
+/** Growth limits, metres. */
+export const VEG_MIN_ELEVATION = 2;
+export const VEG_TREELINE = 2600;
+export const VEG_MAX_SLOPE = 0.55;

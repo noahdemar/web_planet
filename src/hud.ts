@@ -10,6 +10,7 @@
 
 import { MAX_LEVEL, RADIUS, gsdAt } from './planet.js';
 import type { SelectStats } from './quadtree.js';
+import type { VegStats } from './vegetation.js';
 
 const FACE_NAMES = ['+X', '−X', '+Y', '−Y', '+Z', '−Z'];
 
@@ -42,6 +43,7 @@ export interface HudState {
   shadeMode: number;
   groundFollow: boolean;
   stats: SelectStats;
+  veg: VegStats;
 }
 
 const MODES = ['natural', 'LOD level', 'slope', 'normals'];
@@ -90,17 +92,35 @@ export class Hud {
       ${row('shading', MODES[s.shadeMode] ?? '—')}
       ${row('grid', s.gridSpacing > 0 ? metres(s.gridSpacing) : 'off')}
       ${row('ground follow', s.groundFollow ? 'on' : 'off')}
+      <div class="sep"></div>
+      ${row('veg tiles', `${s.veg.tiles}`)}
+      ${row('candidates', fmtCount(s.veg.candidates))}
+      ${row(
+        'instances',
+        s.veg.total > 0
+          ? `<span class="good">${fmtCount(s.veg.total)}</span>${s.veg.overflow ? ' <span class="warn">OVF</span>' : ''}`
+          : '<span style="opacity:.5">press N</span>',
+      )}
+      ${row('near / mid / far', s.veg.perBand.map(fmtCount).join(' · '))}
       <div class="hint">
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> fly ·
         <kbd>Space</kbd>/<kbd>Shift</kbd> up·down · <kbd>Ctrl</kbd> boost<br />
         drag to look · wheel = speed · <kbd>F</kbd> ground-follow<br />
         <kbd>1</kbd>–<kbd>4</kbd> shading · <kbd>G</kbd> metric grid ·
         <kbd>[</kbd><kbd>]</kbd> LOD<br />
-        <kbd>,</kbd><kbd>.</kbd> octaves · <kbd>-</kbd><kbd>=</kbd> max level ·
-        <kbd>T</kbd> to surface · <kbd>R</kbd> reset
+        <kbd>,</kbd><kbd>.</kbd> octaves · <kbd>-</kbd><kbd>=</kbd> max level<br />
+        <kbd>L</kbd> rugged land · <kbd>T</kbd> surface · <kbd>R</kbd> reset<br />
+        <kbd>V</kbd> vegetation · <kbd>B</kbd> bands · <kbd>;</kbd><kbd>'</kbd> density ·
+        <kbd>N</kbd> count
       </div>
     `;
   }
+}
+
+function fmtCount(n: number): string {
+  if (n < 1000) return `${n}`;
+  if (n < 1e6) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1e6).toFixed(2)}M`;
 }
 
 function row(label: string, value: string): string {

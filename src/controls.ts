@@ -12,7 +12,7 @@
  */
 
 import { Matrix4, PerspectiveCamera, Vector3 } from 'three';
-import { MAX_ELEVATION, RADIUS } from './planet.js';
+import { DEFAULT_OCTAVES, MAX_ELEVATION, RADIUS } from './planet.js';
 import { heightAt } from './heightCPU.js';
 import {
   type V3,
@@ -48,13 +48,14 @@ function findRuggedLand(octaves: number, hscale: number): V3 {
     const d: V3 = [r * Math.cos(th), r * Math.sin(th), z];
 
     const h = heightAt(d, octaves, hscale);
-    if (h < 150 || h > 3000) continue; // habitable band, not a summit
+    if (h < 150 || h > 1600) continue; // forested montane band, not a summit
 
     const a = heightAt(normalize([d[0] + probe, d[1], d[2]]), octaves, hscale);
     const b = heightAt(normalize([d[0], d[1] + probe, d[2]]), octaves, hscale);
     const relief = Math.abs(a - h) + Math.abs(b - h);
 
-    const score = relief * 3 + h * 0.15;
+    // Favour relief, but stay well below the treeline so the spot is forested.
+    const score = relief * 3 - Math.abs(h - 700) * 0.25;
     if (score > bestScore) {
       bestScore = score;
       best = d;
@@ -66,8 +67,6 @@ function findRuggedLand(octaves: number, hscale: number): V3 {
 export class FlyControls {
   /** World position, f64. The single source of truth for where we are. */
   pos: V3 = [0, 0, RADIUS + 8_000_000];
-  /** Set once the terrain parameters are known; see `setTerrain`. */
-  private spawned = false;
 
   yaw = 0;
   pitch = -Math.PI / 2.2;
@@ -82,7 +81,7 @@ export class FlyControls {
   private keys = new Set<string>();
   private dragging = false;
   private locked = false;
-  private octaves = 12;
+  private octaves = DEFAULT_OCTAVES;
   private heightScale = 1;
 
   private tmpM = new Matrix4();
@@ -92,18 +91,15 @@ export class FlyControls {
 
   constructor(private dom: HTMLElement) {
     this.attach();
+    // Spawn immediately rather than on the first frame. Deferring it meant the
+    // first update could overwrite a position set from elsewhere.
+    this.reset();
     this.refreshFrame();
   }
 
   setTerrain(octaves: number, heightScale: number): void {
     this.octaves = octaves;
     this.heightScale = heightScale;
-    // Deferred so the first spawn uses the real terrain parameters rather
-    // than the constructor's defaults.
-    if (!this.spawned) {
-      this.spawned = true;
-      this.reset();
-    }
   }
 
   get altitude(): number {

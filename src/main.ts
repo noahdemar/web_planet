@@ -16,6 +16,7 @@ import { Hud } from './hud.js';
 import { directionToFace } from './cubesphere.js';
 import { normalize } from './math/vec3d.js';
 import { auditCracks } from './devAudit.js';
+import { Vegetation } from './vegetation.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
 
@@ -56,6 +57,9 @@ async function main(): Promise<void> {
   const selector = new PatchSelector(DEFAULT_LOD_FACTOR);
   const terrain = new TerrainMesh(selector.buffers);
   scene.add(terrain.mesh);
+
+  const vegetation = new Vegetation();
+  for (const m of vegetation.meshes) scene.add(m);
 
   const controls = new FlyControls(renderer.domElement);
   const hud = new Hud(document.getElementById('hud')!);
@@ -112,6 +116,23 @@ async function main(): Promise<void> {
       case 'KeyR':
         controls.reset();
         break;
+      case 'KeyV':
+        vegetation.setEnabled(!vegetation.isEnabled);
+        break;
+      case 'KeyB':
+        vegetation.setMode(vegetation.debugBands ? 0 : 1);
+        break;
+      case 'Semicolon':
+        vegetation.setDensity(vegetation.density - 0.06);
+        break;
+      case 'Quote':
+        vegetation.setDensity(vegetation.density + 0.06);
+        break;
+      case 'KeyN':
+        // Instance counts live only on the GPU; reading them costs a sync, so
+        // it is on demand rather than every frame.
+        void vegetation.readCounts(renderer);
+        break;
     }
   });
 
@@ -150,6 +171,13 @@ async function main(): Promise<void> {
     );
     terrain.update(stats.patches);
 
+    // GPU-driven vegetation: upload tiles, then scatter and bin entirely on
+    // the GPU. The draw counts are written by the compute pass, so no instance
+    // is ever touched by the CPU (SPEC.md §8).
+    vegetation.setCamera(controls.pos[0], controls.pos[1], controls.pos[2]);
+    vegetation.setOctaves(terrain.octaves);
+    vegetation.update(renderer, selector.vegTileData, stats.vegTiles);
+
     renderer.render(scene, camera);
 
     const frameMs = performance.now() - now;
@@ -174,13 +202,16 @@ async function main(): Promise<void> {
         shadeMode: terrain.shadeMode,
         groundFollow: controls.groundFollow,
         stats,
+        veg: vegetation.stats,
       },
       now,
     );
   });
 
   // A low sun rakes the terrain and makes both relief and any cracks obvious.
-  terrain.setSun(new Vector3(0.62, 0.28, 0.73));
+  const sun = new Vector3(0.62, 0.28, 0.73);
+  terrain.setSun(sun);
+  vegetation.setSun(sun);
 
   // Handle for driving the sim from the devtools console.
   Object.assign(window, {
@@ -191,7 +222,19 @@ async function main(): Promise<void> {
       controls,
       terrain,
       selector,
-      audit: () => auditCracks(renderer, scene, camera),
+      vegetation,
+      // Vegetation is hidden for the audit: crowns silhouetted against the
+      // sky would otherwise read as enclosed background, i.e. false cracks.
+      audit: async () => {
+        const was = vegetation.isEnabled;
+        vegetation.setEnabled(false);
+        try {
+          return await auditCracks(renderer, scene, camera);
+        } finally {
+          vegetation.setEnabled(was);
+        }
+      },
+      vegCounts: () => vegetation.readCounts(renderer),
     },
   });
 }

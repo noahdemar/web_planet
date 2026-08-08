@@ -50,7 +50,7 @@ import {
 } from '../planet.js';
 
 /** Geometry only: the precision-critical offset and the CDLOD morph. Cheap. */
-function geom(s: string): string {
+export function geom(s: string): string {
   return /* wgsl */ `
 
 // Direction delta from the patch centre — the precision-critical routine.
@@ -95,7 +95,7 @@ fn morphed_${s}(gpos: vec2<f32>, gpar: vec3<f32>, A: f32, B: f32, hs: f32,
 }
 
 /** Noise, its analytic derivative, and the elevation field. Expensive. */
-function field(s: string): string {
+export function field(s: string): string {
   return /* wgsl */ `
 
 // PCG3D integer hash. Deliberately not sin-based: at octave 12 the lattice

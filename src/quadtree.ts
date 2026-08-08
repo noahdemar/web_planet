@@ -21,9 +21,12 @@ import {
   MAX_ELEVATION,
   MAX_LEVEL,
   MAX_PATCHES,
+  MAX_VEG_TILES,
   MIN_ELEVATION,
   morphStartFor,
   RADIUS,
+  VEG_LEVEL,
+  VEG_RANGE,
   edgeLengthAt,
 } from './planet.js';
 import { FACES, cubePoint, warp } from './cubesphere.js';
@@ -37,6 +40,8 @@ export interface SelectStats {
   minLevel: number;
   maxLevel: number;
   overflow: boolean;
+  /** Vegetation tiles collected this frame (SPEC.md §8). */
+  vegTiles: number;
 }
 
 /** Per-instance GPU arrays, sized once at construction. */
@@ -67,7 +72,20 @@ export class PatchSelector {
     minLevel: MAX_LEVEL,
     maxLevel: 0,
     overflow: false,
+    vegTiles: 0,
   };
+
+  /**
+   * Scatter tiles for vegetation: five vec4 of parameters each, in the same
+   * form the terrain patches use, so the scatter shader can reuse the terrain's
+   * precision reconstruction unchanged.
+   *
+   * Collected during the same traversal rather than in a second walk — every
+   * node at VEG_LEVEL within VEG_RANGE is necessarily visited, because
+   * range[VEG_LEVEL-1] is more than twice VEG_RANGE.
+   */
+  readonly vegTileData = new Float32Array(MAX_VEG_TILES * 5 * 4);
+  private vegCount = 0;
 
   /** range[L]: a node subdivides while the camera is nearer than this. */
   private ranges = new Float64Array(MAX_LEVEL + 1);
@@ -146,10 +164,12 @@ export class PatchSelector {
     s.minLevel = MAX_LEVEL;
     s.maxLevel = 0;
     s.overflow = false;
+    this.vegCount = 0;
 
     for (let face = 0; face < 6; face++) this.walk(face, 0, 0, 0);
 
     s.patches = this.count;
+    s.vegTiles = this.vegCount;
     if (s.patches === 0) s.minLevel = 0;
     return s;
   }
@@ -227,6 +247,10 @@ export class PatchSelector {
       ),
     );
 
+    if (level === VEG_LEVEL && d <= VEG_RANGE) {
+      this.emitVegTile(face, i, j, A, B, hs, dirC, lenPc);
+    }
+
     const subdivide = level < this.maxLevelCap && d <= this.ranges[level];
     if (subdivide) {
       const i2 = i * 2;
@@ -239,6 +263,51 @@ export class PatchSelector {
     }
 
     this.emit(face, level, A, B, hs, dirC, lenPc);
+  }
+
+  private emitVegTile(
+    face: number,
+    ti: number,
+    tj: number,
+    A: number,
+    B: number,
+    hs: number,
+    dirC: V3,
+    lenPc: number,
+  ): void {
+    if (this.vegCount >= MAX_VEG_TILES) return;
+    const o = this.vegCount++ * 20;
+    const t = this.vegTileData;
+    const { U, V } = FACES[face];
+
+    t[o] = A;
+    t[o + 1] = B;
+    t[o + 2] = hs;
+    t[o + 3] = face;
+
+    t[o + 4] = dirC[0];
+    t[o + 5] = dirC[1];
+    t[o + 6] = dirC[2];
+    t[o + 7] = lenPc;
+
+    // The one f64 subtraction, as for terrain patches (SPEC.md I4).
+    t[o + 8] = dirC[0] * RADIUS - this.camPos[0];
+    t[o + 9] = dirC[1] * RADIUS - this.camPos[1];
+    t[o + 10] = dirC[2] * RADIUS - this.camPos[2];
+    t[o + 11] = 0;
+
+    t[o + 12] = U[0];
+    t[o + 13] = U[1];
+    t[o + 14] = U[2];
+    // Tile indices, so the scatter can build a globally unique cell coordinate.
+    // Salting by list position instead would break determinism (I1): the same
+    // ground would rescatter differently as tiles entered and left view.
+    t[o + 15] = ti;
+
+    t[o + 16] = V[0];
+    t[o + 17] = V[1];
+    t[o + 18] = V[2];
+    t[o + 19] = tj;
   }
 
   private emit(

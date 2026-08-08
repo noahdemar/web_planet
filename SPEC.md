@@ -419,7 +419,7 @@ Each milestone independently verifiable. **Do not proceed past a failing verific
 | **M4** | Hydrology graph + runtime carving | A river is continuous and monotonically downhill, source to sea, at every LOD |
 | **M5** | Regional + local LEM (B5–B6), lazy and cached | Tile boundaries agree without cross-tile communication |
 | **M6** | Amplification stack | Sample `h` at L11 and L19 over 10⁶ random points; assert \|Δ\| < ε (**I2**) |
-| **M7** | Biomes + scatter, one species | Trees don't move or float across LOD transitions; identical across two runs on one machine |
+| **M7** | Biomes + scatter, one species | ◐ GPU-driven substrate done: deterministic scatter, atomic band binning, indirect draw. **215 k instances at 11.7 ms**, no CPU per-instance cost. Biomes and the anchoring check still open |
 | **M8** | Vegetation LOD ladder + VT canopy bake | Frame budget holds under dense-forest worst case |
 | **M9** | Atmosphere, ocean, clouds | Orbital limb and ground-level sky agree |
 | **M10** | Multi-species, disturbance, edges, understory | Visual review against reference photography |
