@@ -143,17 +143,27 @@ src/
   controls.ts     orbit-to-ground camera, f64 world position
   heightCPU.ts    CPU mirror of the height field, for ground-following
   devAudit.ts     offscreen crack counter
+  vegetation.ts   GPU scatter, atomic band binning, indirect draw
   shaders/
     terrain.ts    WGSL: precision reconstruction, noise, shading
+    vegetation.ts WGSL: scatter candidate, billboard, foliage shading
 tools/
   precision.ts    f32 vs f64 vertex error, per level
   hypsometry.ts   elevation distribution vs Earth; parameter solver
 ```
 
 `sim` is exposed on `window` for driving from the console:
-`sim.controls`, `sim.terrain`, `sim.selector`, `await sim.audit()`.
+`sim.controls`, `sim.terrain`, `sim.selector`, `sim.vegetation`,
+`await sim.audit()`, `await sim.vegCounts()`.
 
 ## Next
 
-M2 is the tile store, streaming, and parent-fallback — no hitch on a 500 m/s
-traverse, still no hitch with 200 ms of forced disk latency. See SPEC.md §12.
+Two independent fronts, in rough priority order:
+
+1. **HZB occlusion culling** on the vegetation substrate. Canopy occludes
+   almost everything behind it, so this is the largest remaining win — but
+   scene arrangement decides whether it pays, so measure before assuming.
+2. **M2/M3** — tile store and streaming, then the global bake. Until B2 runs
+   there is no drainage, and drainage is what makes terrain read as real.
+
+See SPEC.md §12 for the full order.
