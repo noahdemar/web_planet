@@ -72,6 +72,8 @@ export class FlyControls {
   pitch = -Math.PI / 2.2;
   speedMul = 1;
   groundFollow = false;
+  /** Vertical look inversion, toggled with I. Horizontal is never inverted. */
+  invertY = false;
 
   /** Local frame, refreshed each update. */
   up: V3 = [0, 0, 1];
@@ -145,8 +147,11 @@ export class FlyControls {
     window.addEventListener('mousemove', (e) => {
       if (!this.locked && !this.dragging) return;
       const s = 0.0022;
-      this.yaw -= e.movementX * s;
-      this.pitch -= e.movementY * s;
+      // Increasing yaw rotates forward toward east, and east is the right-hand
+      // direction (right = cross(forward, up) = east at yaw 0). So moving the
+      // mouse right must *increase* yaw; subtracting turned the wrong way.
+      this.yaw += e.movementX * s;
+      this.pitch += (this.invertY ? 1 : -1) * e.movementY * s;
       this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch));
     });
 

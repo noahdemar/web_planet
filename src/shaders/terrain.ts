@@ -47,7 +47,33 @@ import {
   RELIEF_GAIN,
   RELIEF_LACUNARITY,
   RELIEF_PEAK,
+  VEG_MAX_SLOPE,
+  VEG_MIN_ELEVATION,
+  VEG_TREELINE,
 } from '../planet.js';
+import { atmosphere } from './atmosphere.js';
+
+/**
+ * Octahedral normal packing. Buys the fourth channel of the surface varying
+ * for canopy cover: a unit vector only needs two numbers.
+ */
+export function octPack(s: string): string {
+  return /* wgsl */ `
+fn octWrap_${s}(v: vec2<f32>) -> vec2<f32> {
+  return (1.0 - abs(v.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), v >= vec2<f32>(0.0));
+}
+fn octEncode_${s}(n0: vec3<f32>) -> vec2<f32> {
+  let n = n0 / (abs(n0.x) + abs(n0.y) + abs(n0.z));
+  return select(octWrap_${s}(n.xy), n.xy, n.z >= 0.0);
+}
+fn octDecode_${s}(f: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(f.x, f.y, 1.0 - abs(f.x) - abs(f.y));
+  let t = max(-n.z, 0.0);
+  n = vec3<f32>(n.xy + select(vec2<f32>(t), vec2<f32>(-t), n.xy >= vec2<f32>(0.0)), n.z);
+  return normalize(n);
+}
+`;
+}
 
 /** Geometry only: the precision-critical offset and the CDLOD morph. Cheap. */
 export function geom(s: string): string {
@@ -234,13 +260,46 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32, sea: f32, band: f32) -> ve
 
   return vec4<f32>(h, g);
 }
+
+/**
+ * Fraction of ground under canopy, in [0,1].
+ *
+ * Shared verbatim by the scatter and the terrain shading. That is the whole
+ * point: the ground tint and where plants actually stand are the same
+ * function, so they cannot disagree, and instances can dissolve into the tint
+ * without revealing an edge.
+ */
+fn forestClump_${s}(dir: vec3<f32>) -> f32 {
+  // Three octaves at 7 km / 3 km / 1.3 km — glades, stand edges, dense pockets.
+  // Without this the forest is a uniform mat, which reads as fake from the air
+  // long before any individual tree does.
+  var amp = 1.0;
+  var frq = 900.0;
+  var sum = 0.0;
+  var norm = 0.0;
+  for (var i = 0; i < 3; i = i + 1) {
+    sum = sum + amp * noised_${s}(dir * frq + vec3<f32>(f32(i) * 11.37)).x;
+    norm = norm + amp;
+    amp = amp * 0.55;
+    frq = frq * 2.3;
+  }
+  return smoothstep(-0.42, 0.26, sum / norm);
+}
+
+fn forestCover_${s}(dir: vec3<f32>, h: f32, slope: f32, density: f32) -> f32 {
+  let clump = forestClump_${s}(dir);
+  let lo = smoothstep(${VEG_MIN_ELEVATION}.0, ${VEG_MIN_ELEVATION}.0 + 30.0, h);
+  let hi = 1.0 - smoothstep(${VEG_TREELINE}.0 - 350.0, ${VEG_TREELINE}.0, h);
+  let sl = 1.0 - smoothstep(0.30, ${VEG_MAX_SLOPE}, slope);
+  return clamp(clump * lo * hi * sl * density, 0.0, 1.0);
+}
 `;
 }
 
 const ARGS = `gpos: vec2<f32>, gpar: vec3<f32>,
    iCenter: vec4<f32>, iDirLen: vec4<f32>, iAnchor: vec4<f32>,
    iBU: vec3<f32>, iBV: vec3<f32>, iMorph: vec2<f32>,
-   cfg: vec4<f32>, cfg2: vec4<f32>`;
+   cfg: vec4<f32>, cfg2: vec4<f32>, cfg3: vec4<f32>`;
 
 const UNPACK = `
   let A = iCenter.x;
@@ -268,8 +327,15 @@ fn patchSurface(${ARGS}) -> vec4<f32> {
   // Surface normal from the tangential component of the height gradient.
   let gT = hn.yzw - dir * dot(dir, hn.yzw);
   let nrm = normalize(dir - gT / (radius + hn.x));
-  return vec4<f32>(nrm, hn.x);
+  let slope = 1.0 - dot(nrm, dir);
+
+  // Cover is evaluated per vertex, not per pixel: three extra noise octaves
+  // over ~700k vertices instead of ~3.7M pixels, and the field is smooth
+  // enough at 1.3 km that interpolation costs nothing visible.
+  let cover = forestCover_N(dir, hn.x, slope, cfg3.x);
+  return vec4<f32>(octEncode_N(nrm), hn.x, cover);
 }
+${octPack('N')}
 ${geom('N')}
 ${field('N')}
 `);
@@ -300,31 +366,37 @@ ${geom('P')}
 `);
 
 /**
- * Shading. Self-contained — no shared helpers, so no suffixing needed.
- * mode: 0 = natural, 1 = LOD level, 2 = slope, 3 = normals.
+ * Terrain shading.
+ *
+ * `surf` is (octNormal.xy, elevation, canopyCover) — the normal is octahedral
+ * so the fourth channel can carry cover.
+ *
+ * Roughly physical: albedo is lit by sunlight that has already been attenuated
+ * by the air it travelled through, plus a hemispheric sky term, and the result
+ * then goes through aerial perspective. That last step is what makes distance
+ * read correctly and, incidentally, what hides every LOD and vegetation
+ * transition beyond a few hundred metres.
+ *
+ * mode: 0 = natural, 1 = LOD level, 2 = slope, 3 = normals, 4 = canopy cover.
+ * Debug modes skip the atmosphere so they stay legible.
  */
 export const shadeTerrain = wgslFn(/* wgsl */ `
-fn shadeTerrain(nrm: vec3<f32>, hgt: f32, camPos: vec3<f32>, rel: vec3<f32>,
-                lvl: f32, sunDir: vec3<f32>, mode: f32, grid: f32) -> vec3<f32> {
-  let n = normalize(nrm);
-  // Local up, per pixel. Deriving it from the interpolated position rather
-  // than a per-instance attribute matters: a per-patch value is constant
-  // across the patch and steps visibly at every patch boundary.
-  // f32 camPos is fine here — it feeds a normalize, and 0.8 m of error at
-  // planetary radius is ~1e-7 rad of direction.
-  let up = normalize(camPos + rel);
+fn shadeTerrain(surf: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
+                lvl: f32, sunDir: vec3<f32>, sunCol: vec3<f32>,
+                mode: f32, grid: f32, cfg3: vec4<f32>) -> vec3<f32> {
+  let n = octDecode_T(surf.xy);
+  let hgt = surf.z;
+  let cover = surf.w;
+  let Rg = cfg3.y;
+
+  // Planet-centred surface point. Local up per pixel, not per patch — a
+  // per-instance value steps visibly at every patch boundary.
+  let wp = camPos + rel;
+  let up = normalize(wp);
   let slope = clamp(1.0 - dot(n, up), 0.0, 1.0);
-
   let sd = normalize(sunDir);
-  let ndl = max(dot(n, sd), 0.0);
-  // Cheap hemispheric ambient so shadowed faces stay readable.
-  let amb = 0.22 + 0.18 * clamp(dot(n, up) * 0.5 + 0.5, 0.0, 1.0);
-  let lit = ndl * 0.95 + amb;
 
-  // Metric reference grid. rel is camera-relative, so at ground level it is a
-  // small number carrying full f32 precision — which makes this the instrument
-  // for M1's jitter check: were the precision architecture wrong, these lines
-  // would swim and crawl as the camera moves.
+  // Metric reference grid: the instrument for M1's jitter check.
   var overlay = 0.0;
   if (grid > 0.0) {
     let q = rel / grid;
@@ -334,50 +406,97 @@ fn shadeTerrain(nrm: vec3<f32>, hgt: f32, camPos: vec3<f32>, rel: vec3<f32>,
   }
   let gridCol = vec3<f32>(1.0, 0.9, 0.3);
 
-  if (mode > 2.5) {
+  if (mode > 3.5 && mode < 4.5) {
+    // Canopy cover, the field the scatter and the ground tint share.
+    return vec3<f32>(cover, cover * 0.85, cover * 0.35);
+  }
+  // Every branch is an exclusive range. An open-ended mode > k ladder means
+  // each new debug view is silently swallowed by an earlier one.
+  if (mode > 2.5 && mode < 3.5) {
     return mix(n * 0.5 + 0.5, gridCol, overlay * 0.85);
   }
-  if (mode > 1.5) {
-    let sc = mix(vec3<f32>(0.10, 0.30, 0.16), vec3<f32>(0.92, 0.35, 0.20), slope) * lit;
-    return mix(sc, gridCol, overlay * 0.85);
+  if (mode > 1.5 && mode < 2.5) {
+    return mix(mix(vec3<f32>(0.10, 0.30, 0.16), vec3<f32>(0.92, 0.35, 0.20), slope),
+               gridCol, overlay * 0.85);
   }
-  if (mode > 0.5) {
-    // Level palette: cycles every ~6 levels so adjacent levels stay distinct.
+  if (mode > 0.5 && mode < 1.5) {
     let t = lvl / 19.0;
     let c = vec3<f32>(
       0.5 + 0.5 * cos(6.2831853 * (t * 3.0 + 0.00)),
       0.5 + 0.5 * cos(6.2831853 * (t * 3.0 + 0.33)),
       0.5 + 0.5 * cos(6.2831853 * (t * 3.0 + 0.67)));
-    return mix(c * lit, gridCol, overlay * 0.85);
+    return mix(c, gridCol, overlay * 0.85);
   }
 
-  // Natural: ocean, then an altitude ramp with slope-driven rock exposure.
-  let deep  = vec3<f32>(0.016, 0.055, 0.105);
-  let shelf = vec3<f32>(0.045, 0.145, 0.205);
-  let sand  = vec3<f32>(0.62, 0.56, 0.40);
-  let grass = vec3<f32>(0.16, 0.30, 0.14);
-  let taiga = vec3<f32>(0.13, 0.22, 0.14);
-  let rock  = vec3<f32>(0.34, 0.31, 0.29);
-  let snow  = vec3<f32>(0.92, 0.94, 0.96);
+  // ── albedo ────────────────────────────────────────────────────────────
+  // Reflectances, not screen colours: everything below is multiplied by
+  // incoming light, so these are the values a spectrophotometer would read.
+  let sand  = vec3<f32>(0.38, 0.32, 0.23);
+  let grass = vec3<f32>(0.11, 0.15, 0.07);
+  let dry   = vec3<f32>(0.24, 0.22, 0.12);
+  let rock  = vec3<f32>(0.17, 0.155, 0.145);
+  let scree = vec3<f32>(0.22, 0.20, 0.19);
+  let snow  = vec3<f32>(0.72, 0.74, 0.78);
+
+  let hv = fract(sin(dot(up, vec3<f32>(91.7, 47.3, 63.1))) * 4371.13);
 
   if (hgt < 0.0) {
-    let t = clamp(-hgt / 3200.0, 0.0, 1.0);
-    let w = mix(shelf, deep, t);
-    // Water reads as a smooth dielectric: flat normal, tighter highlight.
-    let wl = max(dot(up, sd), 0.0) * 0.9 + 0.12;
-    return mix(w * wl, gridCol, overlay * 0.85);
+    // Water: a dielectric, so almost all of what you see is reflected sky and
+    // a sun glint, not diffuse colour.
+    let depth = clamp(-hgt / 900.0, 0.0, 1.0);
+    let body = mix(vec3<f32>(0.024, 0.055, 0.062), vec3<f32>(0.004, 0.012, 0.026), depth);
+    let v = normalize(-rel);
+    let f0 = 0.02;
+    let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(v, up), 0.0, 1.0), 5.0);
+    let hvec = normalize(v + sd);
+    let spec = pow(max(dot(up, hvec), 0.0), 900.0) * 2.4;
+    let sunTrW = transmit_T(sunDepth_T(wp, sd, Rg));
+    let skyW = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.05 + 0.6 * max(dot(up, sd), 0.0));
+    var wc = body * skyW * 3.0
+           + sunCol * sunTrW * (spec + fres * 0.35) * max(dot(up, sd), 0.0);
+    wc = aerial_T(wc, camPos, wp, sd, Rg, sunCol);
+    return mix(wc, gridCol, overlay * 0.85);
   }
 
-  var c = sand;
-  c = mix(c, grass, smoothstep(20.0, 240.0, hgt));
-  c = mix(c, taiga, smoothstep(900.0, 2100.0, hgt));
-  c = mix(c, rock,  smoothstep(2000.0, 3400.0, hgt));
-  // Snow accumulates with altitude but sheds off steep faces.
-  let snowLine = smoothstep(3100.0, 4600.0, hgt) * (1.0 - smoothstep(0.35, 0.72, slope));
-  c = mix(c, snow, snowLine);
-  // Rock shows through wherever the surface is steep, at any altitude.
-  c = mix(c, rock, smoothstep(0.42, 0.78, slope));
+  var alb = mix(sand, grass, smoothstep(6.0, 90.0, hgt));
+  alb = mix(alb, dry, smoothstep(700.0, 1700.0, hgt) * (0.35 + 0.5 * hv));
+  alb = mix(alb, rock, smoothstep(1900.0, 3200.0, hgt));
+  // Steep ground sheds soil at any altitude — the strongest single cue that a
+  // slope is a slope.
+  alb = mix(alb, rock, smoothstep(0.30, 0.62, slope));
+  alb = mix(alb, scree, smoothstep(0.22, 0.45, slope) * (1.0 - smoothstep(0.62, 0.8, slope)) * hv);
+  // Snow lies where it is high, flat and cold, and blows off ridges.
+  let snowLine = smoothstep(2500.0, 3600.0, hgt) * (1.0 - smoothstep(0.30, 0.60, slope));
+  alb = mix(alb, snow, snowLine);
 
-  return mix(c * lit, gridCol, overlay * 0.85);
+  // Canopy. Same cover field the scatter uses, so ground colour and where
+  // plants actually stand cannot disagree, and instances can dissolve into
+  // this without revealing an edge.
+  let canopy = mix(vec3<f32>(0.036, 0.055, 0.026), vec3<f32>(0.055, 0.080, 0.032), hv);
+  alb = mix(alb, canopy, cover * (1.0 - snowLine) * 0.92);
+
+  if (mode > 4.5) {
+    // Raw albedo, unlit — separates "the surface is the wrong colour" from
+    // "the surface is lit wrongly", which look identical in the final image.
+    return alb;
+  }
+
+  // ── lighting ──────────────────────────────────────────────────────────
+  let ndl = max(dot(n, sd), 0.0);
+  let sunTr = transmit_T(sunDepth_T(wp, sd, Rg));
+  // Soft terminator: unresolved relief keeps scattering light just past the
+  // geometric horizon, and a hard cut there reads as a CG edge.
+  let soft = smoothstep(-0.10, 0.12, dot(n, sd));
+  let direct = alb * (1.0 / 3.14159265) * sunCol * sunTr * ndl * soft;
+
+  let sunUp = max(dot(up, sd), 0.0);
+  let sky = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.045 + 0.6 * sunUp);
+  let ambient = alb * sky * (0.5 + 0.5 * dot(n, up));
+
+  var col = direct + ambient;
+  col = aerial_T(col, camPos, wp, sd, Rg, sunCol);
+  return mix(col, gridCol * 0.5, overlay * 0.85);
 }
+${octPack('T')}
+${atmosphere('T')}
 `);

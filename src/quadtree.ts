@@ -26,7 +26,7 @@ import {
   morphStartFor,
   RADIUS,
   VEG_LEVEL,
-  VEG_RANGE,
+  VEG_TILE_RANGE,
   edgeLengthAt,
 } from './planet.js';
 import { FACES, cubePoint, warp } from './cubesphere.js';
@@ -247,7 +247,7 @@ export class PatchSelector {
       ),
     );
 
-    if (level === VEG_LEVEL && d <= VEG_RANGE) {
+    if (level === VEG_LEVEL && d <= VEG_TILE_RANGE) {
       this.emitVegTile(face, i, j, A, B, hs, dirC, lenPc);
     }
 

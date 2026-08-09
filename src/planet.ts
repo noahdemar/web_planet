@@ -121,8 +121,13 @@ export const VEG_LEVEL = 14;
 /** Scatter cells per tile edge. 128 → 4.4 m spacing ≈ 520 stems/ha. */
 export const VEG_CELLS = 128;
 
-/** Tiles resident at once. Sizes the tile-parameter buffer. */
-export const MAX_VEG_TILES = 24;
+/**
+ * Tiles resident at once. Must comfortably exceed the number within
+ * VEG_TILE_RANGE (≈15 at L14, plus boundary), because the traversal emits in
+ * quadtree order, not by distance — overflow silently keeps an arbitrary
+ * subset and empties the bands nearest the camera.
+ */
+export const MAX_VEG_TILES = 32;
 
 /** Distance beyond which canopy becomes a terrain material, not objects. */
 export const VEG_RANGE = 1100;
@@ -153,3 +158,31 @@ export const VEG_CAPACITY = VEG_BAND_CAPACITY * VEG_BANDS.length;
 export const VEG_MIN_ELEVATION = 2;
 export const VEG_TREELINE = 2600;
 export const VEG_MAX_SLOPE = 0.55;
+
+/**
+ * Baseline canopy closure before clumping and the growth gates. Multiplies the
+ * shared cover field, so it scales instance count and ground tint together.
+ */
+export const FOREST_DENSITY = 0.9;
+
+/**
+ * Where instances begin dissolving. A long tail matters more than a late one:
+ * fading over the outer half of the range makes the forest *thin*, which the
+ * eye reads as distance, whereas a short fade near the limit reads as an edge
+ * however smooth it is. They must reach zero by VEG_RANGE, where the terrain's
+ * canopy tint carries the forest alone.
+ */
+export const VEG_FADE_START = VEG_RANGE * 0.45;
+
+/**
+ * Tile selection radius. Only a small margin over VEG_RANGE is needed, not a
+ * tile diagonal: tiles are selected by their *nearest* point, so any tile
+ * holding an instance within VEG_RANGE necessarily has a nearest point within
+ * VEG_RANGE too. The margin only covers the sphere approximation the selector
+ * uses for distance. Overshooting here is expensive — tile count grows with
+ * the square of this — and it is what starves the near bands.
+ */
+export const VEG_TILE_RANGE = VEG_RANGE + 120;
+
+/** Quads thinner than this many pixels only alias; fade them out instead. */
+export const VEG_MIN_PIXELS = 2.5;

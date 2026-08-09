@@ -17,11 +17,8 @@
 
 import { wgslFn } from 'three/tsl';
 import { geom, field } from './terrain.js';
-import {
-  VEG_MAX_SLOPE,
-  VEG_MIN_ELEVATION,
-  VEG_TREELINE,
-} from '../planet.js';
+import { atmosphere } from './atmosphere.js';
+import { VEG_MAX_SLOPE } from '../planet.js';
 
 /**
  * One scatter candidate.
@@ -59,49 +56,50 @@ fn vegSample(t0: vec4<f32>, t1: vec4<f32>, t2: vec4<f32>,
 
   // One hash drives jitter, thinning, species and size.
   let r = hash33_V(vec3<f32>(gcell, t0.w * 4096.0 + vcfg.z));
-
-  // Thin first: it is free, and it removes ~60% of candidates before the
-  // expensive height evaluation.
-  if (r.z * 0.5 + 0.5 > density) {
-    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
-  }
+  let u = r.z * 0.5 + 0.5;
 
   // Jittered grid rather than a regular one. A pure lattice reads as an
-  // orchard from the air; full jitter clumps badly. 0.42 is close to the
-  // best blue-noise-like spacing you get from one hash.
+  // orchard from the air; full jitter clumps badly.
   let g = (cell + vec2<f32>(0.5) + r.xy * 0.42) / cells * 2.0 - vec2<f32>(1.0);
-
   let dd = offset_V(g, A, B, hs, Pc, lenPc, BU, BV);
   let dir = dirC + dd;
-  let hn = height_V(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y);
-  let h = hn.x;
 
-  if (h < ${VEG_MIN_ELEVATION}.0 || h > ${VEG_TREELINE}.0) {
+  // Cheap conservative reject: cover can only be reduced by the growth gates
+  // below, so anything failing against clump*density alone can never pass.
+  // Three noise octaves here save seventeen there.
+  let clump = forestClump_V(dir);
+  if (u > clump * density) {
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
   }
+
+  let hn = height_V(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y);
+  let h = hn.x;
 
   // Surface normal from the tangential height gradient, as in the terrain
   // shader — trees do not grow on cliffs.
   let gT = hn.yzw - dir * dot(dir, hn.yzw);
   let nrm = normalize(dir - gT / (cfg.x + h));
   let slope = 1.0 - dot(nrm, dir);
-  if (slope > ${VEG_MAX_SLOPE}) {
+
+  // Accept against exactly the cover the terrain shader tints the ground with,
+  // using the same hash sample. Instance density and ground colour are then
+  // the same function, which is what lets one dissolve into the other.
+  let cover = forestCover_V(dir, h, slope, density);
+  if (u > cover) {
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
   }
 
   let pos = anchorRel + dirC * h + dd * (cfg.x + h);
 
   // Inverse-J size distribution: many small stems, few large. Uniform sizing
-  // is the single clearest tell of a procedural forest (SPEC.md §8). r.x is
-  // roughly uniform on [-1,1]; the fourth power skews hard toward small.
-  let u = r.x * 0.5 + 0.5;
-  let small = u * u * u * u;
-  var scale = mix(2.5, 27.0, small);
-  // Thin toward the treeline and toward the shore.
-  scale = scale * (1.0 - smoothstep(${VEG_TREELINE}.0 - 350.0, ${VEG_TREELINE}.0, h));
-  scale = scale * smoothstep(${VEG_MIN_ELEVATION}.0, ${VEG_MIN_ELEVATION}.0 + 25.0, h);
-  // Crowding: steeper ground carries smaller stems.
-  scale = scale * (1.0 - 0.55 * smoothstep(0.15, ${VEG_MAX_SLOPE}, slope));
+  // is the single clearest tell of a procedural forest (SPEC.md §8).
+  let sv = r.x * 0.5 + 0.5;
+  let small = sv * sv * sv * sv;
+  var scale = mix(3.0, 29.0, small);
+  // Thinner cover grows smaller stems — edges and glades taper rather than
+  // ending in full-height trees against bare ground.
+  scale = scale * (0.45 + 0.55 * smoothstep(0.0, 0.55, cover));
+  scale = scale * (1.0 - 0.45 * smoothstep(0.15, ${VEG_MAX_SLOPE}, slope));
 
   return vec4<f32>(pos, max(scale, 0.0));
 }
@@ -117,51 +115,92 @@ ${field('V')}
  * camera sits at the origin — the view vector *is* the instance position.
  */
 export const billboard = wgslFn(/* wgsl */ `
-fn billboard(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>) -> vec3<f32> {
+fn billboard(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>,
+             fadeCfg: vec4<f32>) -> vec3<f32> {
   let base = inst.xyz;
-  let scale = inst.w;
+  let d = length(base);
+
+  // Sub-pixel fade. A quad thinner than a couple of pixels contributes nothing
+  // but aliasing, and removing it costs less than filtering it.
+  let px = inst.w * fadeCfg.z / max(d, 1.0);
+  let sizeFade = smoothstep(fadeCfg.w * 0.35, fadeCfg.w, px);
+  // Range fade. Instances must be gone before the scatter radius, where the
+  // terrain's canopy tint takes over — otherwise the forest ends at a circle.
+  let rangeFade = 1.0 - smoothstep(fadeCfg.x, fadeCfg.y, d);
+  let scale = inst.w * min(sizeFade, rangeFade);
+
   let up = normalize(camPos + base);
   var right = cross(up, base);
   let l = length(right);
   // Degenerate only when looking straight down the instance's own axis, where
   // the quad is edge-on and invisible anyway.
   right = select(vec3<f32>(1.0, 0.0, 0.0), right / max(l, 1e-6), l > 1e-6);
-  return base + right * (corner.x * scale * 0.55) + up * (corner.y * scale);
+  return base + right * (corner.x * scale * 0.6) + up * (corner.y * scale);
 }
 `);
 
-/** Foliage shading. Deliberately flat and cheap — this is a placeholder canopy. */
+/**
+ * Foliage shading.
+ *
+ * Lit and hazed with exactly the same air as the terrain, so a tree and the
+ * ground it stands on never disagree about distance — a tree shaded without
+ * aerial perspective sits in front of the landscape like a sticker.
+ */
 export const shadeVegetation = wgslFn(/* wgsl */ `
 fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
-                   sunDir: vec3<f32>, band: f32, mode: f32) -> vec4<f32> {
-  // Soft elliptical canopy mask, so the quad does not read as a rectangle.
-  let d = vec2<f32>((uv.x - 0.5) * 2.0, (uv.y - 0.55) * 2.2);
-  let m = 1.0 - smoothstep(0.55, 1.0, dot(d, d));
-  // Trunk: a narrow column in the lower third.
-  let trunk = (1.0 - smoothstep(0.035, 0.075, abs(uv.x - 0.5))) *
-              (1.0 - smoothstep(0.30, 0.42, uv.y));
-  let alpha = clamp(max(m, trunk), 0.0, 1.0);
-  if (alpha < 0.35) { discard; }
+                   sunDir: vec3<f32>, sunCol: vec3<f32>,
+                   band: f32, mode: f32, cfg: vec4<f32>) -> vec3<f32> {
+  // Soft crown mask so the quad does not read as a rectangle, with a hashed
+  // aspect so neighbouring crowns are not identical silhouettes.
+  let v = fract(inst.x * 0.013 + inst.z * 0.029 + inst.w * 0.17);
+  let wob = 0.85 + 0.4 * v;
+  let d = vec2<f32>((uv.x - 0.5) * 2.05, (uv.y - 0.58) * (2.15 * wob));
+  let crown = 1.0 - smoothstep(0.5, 1.0, dot(d, d));
+  let trunk = (1.0 - smoothstep(0.030, 0.062, abs(uv.x - 0.5))) *
+              (1.0 - smoothstep(0.26, 0.40, uv.y));
+  let alpha = clamp(max(crown, trunk), 0.0, 1.0);
+  if (alpha < 0.4) { discard; }
 
   if (mode > 0.5) {
-    // Band debug: near green, mid amber, far magenta.
     let c = select(select(vec3<f32>(0.95, 0.25, 0.85),
                           vec3<f32>(0.95, 0.65, 0.15), band < 1.5),
                    vec3<f32>(0.25, 0.85, 0.35), band < 0.5);
-    return vec4<f32>(c, alpha);
+    return c;
   }
 
-  let up = normalize(camPos + inst.xyz);
+  let Rg = cfg.x;
+  let wp = camPos + inst.xyz;
+  let up = normalize(wp);
   let sd = normalize(sunDir);
-  // Vertical gradient stands in for self-shadowing under the canopy.
-  let ao = mix(0.35, 1.0, smoothstep(0.0, 0.75, uv.y));
-  let lit = max(dot(up, sd), 0.0) * 0.55 + 0.45;
 
-  // Hash the instance so neighbouring crowns differ in hue and value.
-  let v = fract(inst.x * 0.013 + inst.z * 0.029 + inst.w * 0.17);
-  let canopy = mix(vec3<f32>(0.11, 0.26, 0.10), vec3<f32>(0.22, 0.38, 0.15), v);
-  let bark = vec3<f32>(0.16, 0.12, 0.09);
-  let c = mix(canopy, bark, trunk * (1.0 - m));
-  return vec4<f32>(c * ao * lit, alpha);
+  // Needle and broadleaf albedos, both low — foliage is far darker than
+  // intuition suggests, and getting this wrong is why CG forests glow.
+  let needle = vec3<f32>(0.030, 0.052, 0.022);
+  let broad  = vec3<f32>(0.052, 0.082, 0.030);
+  let canopy = mix(needle, broad, v);
+  let bark   = vec3<f32>(0.055, 0.042, 0.030);
+  let alb = mix(canopy, bark, trunk * (1.0 - crown));
+
+  // Vertical gradient stands in for self-shadowing within the crown, and the
+  // horizontal term fakes a round form on a flat quad.
+  let ao = mix(0.22, 1.0, smoothstep(0.0, 0.8, uv.y));
+  let form = mix(0.55, 1.0, 1.0 - abs(uv.x - 0.5) * 1.6);
+
+  let sunTr = transmit_A(sunDepth_A(wp, sd, Rg));
+  let sunUp = max(dot(up, sd), 0.0);
+  // Foliage is a thin scatterer: some light comes through the leaf as well as
+  // off it, which is why canopies glow slightly against the sun.
+  let through = pow(max(dot(normalize(-inst.xyz), sd), 0.0), 3.0) * 0.35;
+  // The 1/pi is not optional: the terrain uses it, and omitting it here made
+  // foliage pi times brighter than the ground it stands on, which is exactly
+  // the tonal step that gives a vegetation boundary away.
+  let direct = alb * (1.0 / 3.14159265) * sunCol * sunTr
+             * (sunUp * 1.7 + through) * ao * form;
+  let sky = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.045 + 0.6 * sunUp);
+  var col = direct + alb * sky * ao;
+
+  col = aerial_A(col, camPos, wp, sd, Rg, sunCol);
+  return col;
 }
+${atmosphere('A')}
 `);

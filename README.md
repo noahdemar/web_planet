@@ -30,7 +30,9 @@ bake pipeline at M3 requires compute shaders.
 | `F` | ground-follow at eye height |
 | `V` / `B` | vegetation on·off / band debug colours |
 | `;` `'` | vegetation density · `N` read instance counts |
-| `1`–`4` | shading: natural, LOD level, slope, normals |
+| `O` / `P` | sun elevation / azimuth (hold Shift to reverse) |
+| `I` | invert vertical look |
+| `1`–`6` | shading: natural, LOD, slope, normals, cover, albedo |
 | `G` | metric grid: off → 100 m → 10 m → 1 m → 10 cm |
 | `[` `]` | LOD factor · `,` `.` octaves · `-` `=` max level |
 
@@ -78,6 +80,20 @@ independent of how many instances survive.
 density is 0 / 6.3 k / 208.6 k — the far band covers 96% of the scattered area,
 which is why band capacities are equal rather than tapered.
 
+**Seamless transitions.** The forest used to end at a visible circle. It now
+dissolves, because the scatter and the terrain shading share one canopy-cover
+field — the ground tint and where plants actually stand are literally the same
+function, so instances can fade into the tint without revealing an edge.
+Instances thin over the outer half of the range, and sub-pixel quads fade out
+rather than alias.
+
+**Atmosphere.** Single-scattering Rayleigh + Mie, shared by terrain, foliage
+and the sky dome so the horizon is continuous by construction. Aerial
+perspective is not decoration: distant LOD changes and the vegetation fade sit
+behind progressively more air, which is why those transitions are invisible in
+a photograph and obvious without it. Shading is now roughly physical —
+reflectances lit by sun irradiance, through an ACES curve.
+
 **Measured realism, not eyeballed.** `npm run hypsometry` compares the
 elevation distribution against Earth's and can solve for better parameters
 (`-- --solve`). Land fraction 29.2% vs Earth's 29.2%; land median 850 m vs
@@ -109,6 +125,16 @@ inside a noise cell is quantised to `F · 2⁻²³`; past 17 octaves that exceed
 is intrinsic to evaluating a global function from a unit vector in f32. Detail
 below ~20 m arrives at M5/M6 by sampling per-tile data instead, which sidesteps
 the problem entirely (SPEC.md §6). Press `.` past 17 to watch it break.
+
+**Vegetation and ground still differ in texture at the handoff.** Tone now
+matches, and the fade has no hard edge, but instanced crowns have relief and
+inter-crown shadowing while the tinted ground is smooth. Closing that needs the
+canopy normal and height baked into the terrain virtual texture (SPEC §8), not
+more tuning.
+
+**No clouds, no water surface detail, no shadows.** The reference images imply
+all three. Clouds and shadow cascades are M9; water is currently a Fresnel
+term over a flat sphere, with no waves and no shoreline.
 
 **Vegetation is billboard quads, not plants.** The point of this stage was the
 substrate, not the art: one camera-facing quad per instance with a procedural

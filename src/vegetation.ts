@@ -50,10 +50,14 @@ import {
   RADIUS,
   SEA_BAND,
   SEA_LEVEL,
+  FOREST_DENSITY,
   VEG_BAND_CAPACITY,
   VEG_BANDS,
   VEG_CAPACITY,
   VEG_CELLS,
+  VEG_FADE_START,
+  VEG_MIN_PIXELS,
+  VEG_RANGE,
 } from './planet.js';
 import { billboard, shadeVegetation, vegSample } from './shaders/vegetation.js';
 
@@ -130,7 +134,12 @@ export class Vegetation {
   private cfg = uniform(new Vector4(RADIUS, 1, DEFAULT_OCTAVES, 0));
   private cfg2 = uniform(new Vector4(SEA_LEVEL, SEA_BAND, 0, 0));
   /** (cells, density, seed, tileCount) */
-  private vcfg = uniform(new Vector4(VEG_CELLS, 0.42, 17, 0));
+  private vcfg = uniform(new Vector4(VEG_CELLS, FOREST_DENSITY, 17, 0));
+  /** (fadeStart, fadeEnd, pixelsPerRadian, minPixels) */
+  private fadeCfg = uniform(
+    new Vector4(VEG_FADE_START, VEG_RANGE, 1000, VEG_MIN_PIXELS),
+  );
+  private sunCol = uniform(new Vector3(1, 0.97, 0.92));
   private camPos = uniform(new Vector3());
   private sun = uniform(new Vector3(0.62, 0.28, 0.73).normalize());
   private mode = uniform(0);
@@ -226,7 +235,7 @@ export class Vegetation {
 
       const mat = new MeshBasicNodeMaterial();
       mat.positionNode = asVec3(
-        billboard({ inst, corner, camPos: this.camPos }),
+        billboard({ inst, corner, camPos: this.camPos, fadeCfg: this.fadeCfg }),
       );
       const shaded = asVec4(
         shadeVegetation({
@@ -234,8 +243,10 @@ export class Vegetation {
           uv: varying(quv, `vUv${b}`),
           camPos: this.camPos,
           sunDir: this.sun,
+          sunCol: this.sunCol,
           band: float(b),
           mode: this.mode,
+          cfg: this.cfg,
         }),
       );
       mat.colorNode = asVec3(shaded.xyz);
@@ -279,8 +290,17 @@ export class Vegetation {
     this.camPos.value.set(x, y, z);
   }
 
-  setSun(d: Vector3): void {
+  setSun(d: Vector3, colour?: Vector3): void {
     this.sun.value.copy(d).normalize();
+    if (colour) this.sunCol.value.copy(colour);
+  }
+
+  /**
+   * Pixels an object one metre tall subtends at one metre. Drives the
+   * sub-pixel fade, so it has to follow the viewport and field of view.
+   */
+  setProjectionScale(pxPerRadian: number): void {
+    this.fadeCfg.value.z = pxPerRadian;
   }
 
   /**

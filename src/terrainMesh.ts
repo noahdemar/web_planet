@@ -26,13 +26,14 @@ import {
   PATCH_VERTS,
   RADIUS,
   FACE_EDGE,
+  FOREST_DENSITY,
   SEA_BAND,
   SEA_LEVEL,
 } from './planet.js';
 import type { PatchBuffers } from './quadtree.js';
 import { patchPosition, patchSurface, shadeTerrain } from './shaders/terrain.js';
 
-export type ShadeMode = 0 | 1 | 2 | 3;
+export type ShadeMode = 0 | 1 | 2 | 3 | 4 | 5;
 
 // wgslFn is declared as returning an untyped Node, and TSL only attaches
 // swizzle/assignment types to nodes with a known type. These recover the
@@ -120,7 +121,11 @@ export class TerrainMesh {
   private cfg = uniform(new Vector4(RADIUS, 1, DEFAULT_OCTAVES, 2 / PATCH_SEGS));
   /** cfg2 = (seaLevel, seaBand, referenceRadius, faceEdge/segments) */
   private cfg2 = uniform(new Vector4(SEA_LEVEL, SEA_BAND, RADIUS, FACE_EDGE / PATCH_SEGS));
+  /** cfg3 = (forestDensity, planetRadius, —, —) */
+  private cfg3 = uniform(new Vector4(FOREST_DENSITY, RADIUS, 0, 0));
   private sun = uniform(new Vector3(0.55, 0.42, 0.72).normalize());
+  /** Sun irradiance, not a screen colour — everything is multiplied by it. */
+  private sunCol = uniform(new Vector3(1, 0.97, 0.92));
   /** Camera world position in f32 — shading only, never geometry (SPEC.md I4). */
   private camPos = uniform(new Vector3());
   private mode = uniform(0);
@@ -159,12 +164,13 @@ export class TerrainMesh {
       iMorph: attribute('iMorph', 'vec2'),
       cfg: this.cfg,
       cfg2: this.cfg2,
+      cfg3: this.cfg3,
     };
 
     // One expensive evaluation, reused: the same node feeds both the vertex
     // position and the fragment stage, so the noise runs once per vertex.
     const surf = asVec4(patchSurface(args));
-    const position = asVec3(patchPosition({ ...args, hgt: surf.w }));
+    const position = asVec3(patchPosition({ ...args, hgt: surf.z }));
 
     const surfV = varying(surf, 'vSurf');
     const level = varying(iAnchor.w, 'vLevel');
@@ -174,14 +180,15 @@ export class TerrainMesh {
     material.positionNode = position;
     material.colorNode = asVec3(
       shadeTerrain({
-        nrm: surfV.xyz,
-        hgt: surfV.w,
+        surf: surfV,
         camPos: this.camPos,
         rel: relPos,
         lvl: level,
         sunDir: this.sun,
+        sunCol: this.sunCol,
         mode: this.mode,
         grid: this.gridSpacing,
+        cfg3: this.cfg3,
       }),
     );
     this.material = material;
@@ -245,7 +252,12 @@ export class TerrainMesh {
     return this.gridSpacing.value;
   }
 
-  setSun(d: Vector3): void {
+  setSun(d: Vector3, colour?: Vector3): void {
     this.sun.value.copy(d).normalize();
+    if (colour) this.sunCol.value.copy(colour);
+  }
+
+  setForestDensity(v: number): void {
+    this.cfg3.value.x = v;
   }
 }

@@ -6,7 +6,7 @@
  * precision jitter, stable frame time.
  */
 
-import { PerspectiveCamera, Scene, Vector3 } from 'three';
+import { ACESFilmicToneMapping, PerspectiveCamera, Scene, Vector3 } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { DEFAULT_LOD_FACTOR, MAX_LEVEL, RADIUS } from './planet.js';
 import { PatchSelector } from './quadtree.js';
@@ -17,6 +17,7 @@ import { directionToFace } from './cubesphere.js';
 import { normalize } from './math/vec3d.js';
 import { auditCracks } from './devAudit.js';
 import { Vegetation } from './vegetation.js';
+import { Sky } from './sky.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
 
@@ -47,7 +48,12 @@ async function main(): Promise<void> {
   });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
-  renderer.setClearColor(0x05070a, 1);
+  renderer.setClearColor(0x000000, 1);
+  // The shaders emit radiance, not screen colour, so a tone curve is required
+  // rather than decorative. ACES also keeps the sun disc and snow from
+  // clipping to flat white, which is most of what makes a render look CG.
+  renderer.toneMapping = ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.55;
   document.body.appendChild(renderer.domElement);
   await renderer.init();
 
@@ -57,6 +63,9 @@ async function main(): Promise<void> {
   const selector = new PatchSelector(DEFAULT_LOD_FACTOR);
   const terrain = new TerrainMesh(selector.buffers);
   scene.add(terrain.mesh);
+
+  const sky = new Sky();
+  scene.add(sky.mesh);
 
   const vegetation = new Vegetation();
   for (const m of vegetation.meshes) scene.add(m);
@@ -75,7 +84,7 @@ async function main(): Promise<void> {
 
   addEventListener('keydown', (e) => {
     switch (e.code) {
-      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
+      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5': case 'Digit6':
         terrain.setMode((+e.code.slice(5) - 1) as ShadeMode);
         break;
       case 'KeyG':
@@ -115,6 +124,17 @@ async function main(): Promise<void> {
         break;
       case 'KeyR':
         controls.reset();
+        break;
+      case 'KeyO':
+        sunEl = Math.max(-8, Math.min(88, sunEl + (e.shiftKey ? -4 : 4)));
+        aimSun(sunEl, sunAz);
+        break;
+      case 'KeyP':
+        sunAz = (sunAz + (e.shiftKey ? -12 : 12)) % 360;
+        aimSun(sunEl, sunAz);
+        break;
+      case 'KeyI':
+        controls.invertY = !controls.invertY;
         break;
       case 'KeyV':
         vegetation.setEnabled(!vegetation.isEnabled);
@@ -163,6 +183,12 @@ async function main(): Promise<void> {
 
     terrain.setCameraPosition(controls.pos[0], controls.pos[1], controls.pos[2]);
     terrain.setReferenceRadius(controls.groundRadius);
+    sky.update(controls.pos[0], controls.pos[1], controls.pos[2], camera.near);
+    // Pixels subtended by a one-metre object at one metre — drives the
+    // sub-pixel vegetation fade, so it must track viewport and field of view.
+    vegetation.setProjectionScale(
+      renderer.domElement.height / (2 * Math.tan((camera.fov * Math.PI) / 360)),
+    );
     const stats = selector.select(
       controls.pos,
       controls.groundRadius,
@@ -208,10 +234,43 @@ async function main(): Promise<void> {
     );
   });
 
-  // A low sun rakes the terrain and makes both relief and any cracks obvious.
-  const sun = new Vector3(0.62, 0.28, 0.73);
-  terrain.setSun(sun);
-  vegetation.setSun(sun);
+  // The sun is fixed in world space, as it must be, but a fixed vector lands
+  // at an arbitrary local elevation — the spawn happened to get sunset. Aim it
+  // once from the spawn's own horizon frame so the default view is lit, and
+  // expose the control for scrubbing time of day.
+  const sun = new Vector3();
+  const sunColour = new Vector3(1.0, 0.965, 0.92).multiplyScalar(17);
+
+  function aimSun(elevationDeg: number, azimuthDeg: number): void {
+    const el = (elevationDeg * Math.PI) / 180;
+    const az = (azimuthDeg * Math.PI) / 180;
+    const up = normalize(controls.pos);
+    const ref: [number, number, number] =
+      Math.abs(up[1]) > 0.999 ? [0, 0, 1] : [0, 1, 0];
+    const east = normalize([
+      ref[1] * up[2] - ref[2] * up[1],
+      ref[2] * up[0] - ref[0] * up[2],
+      ref[0] * up[1] - ref[1] * up[0],
+    ]);
+    const north = normalize([
+      up[1] * east[2] - up[2] * east[1],
+      up[2] * east[0] - up[0] * east[2],
+      up[0] * east[1] - up[1] * east[0],
+    ]);
+    const ce = Math.cos(el);
+    sun.set(
+      up[0] * Math.sin(el) + (north[0] * Math.cos(az) + east[0] * Math.sin(az)) * ce,
+      up[1] * Math.sin(el) + (north[1] * Math.cos(az) + east[1] * Math.sin(az)) * ce,
+      up[2] * Math.sin(el) + (north[2] * Math.cos(az) + east[2] * Math.sin(az)) * ce,
+    ).normalize();
+    terrain.setSun(sun, sunColour);
+    vegetation.setSun(sun, sunColour);
+    sky.setSun(sun, sunColour);
+  }
+
+  let sunEl = 38;
+  let sunAz = 130;
+  aimSun(sunEl, sunAz);
 
   // Handle for driving the sim from the devtools console.
   Object.assign(window, {
@@ -223,15 +282,22 @@ async function main(): Promise<void> {
       terrain,
       selector,
       vegetation,
-      // Vegetation is hidden for the audit: crowns silhouetted against the
-      // sky would otherwise read as enclosed background, i.e. false cracks.
+      sky,
+      aimSun,
+      // Both vegetation and the sky are hidden for the audit. Crowns
+      // silhouetted against the sky would read as enclosed background, and the
+      // sky dome paints over the probe colour entirely — either one makes the
+      // measurement meaningless rather than merely noisy.
       audit: async () => {
-        const was = vegetation.isEnabled;
+        const wasVeg = vegetation.isEnabled;
+        const wasSky = sky.mesh.visible;
         vegetation.setEnabled(false);
+        sky.mesh.visible = false;
         try {
           return await auditCracks(renderer, scene, camera);
         } finally {
-          vegetation.setEnabled(was);
+          vegetation.setEnabled(wasVeg);
+          sky.mesh.visible = wasSky;
         }
       },
       vegCounts: () => vegetation.readCounts(renderer),

@@ -8,7 +8,7 @@
  * this one has not, and the metric grid makes that visible.
  */
 
-import { MAX_LEVEL, RADIUS, gsdAt } from './planet.js';
+import { MAX_LEVEL, MAX_VEG_TILES, RADIUS, gsdAt } from './planet.js';
 import type { SelectStats } from './quadtree.js';
 import type { VegStats } from './vegetation.js';
 
@@ -46,7 +46,7 @@ export interface HudState {
   veg: VegStats;
 }
 
-const MODES = ['natural', 'LOD level', 'slope', 'normals'];
+const MODES = ['natural', 'LOD level', 'slope', 'normals', 'canopy cover', 'albedo'];
 
 export class Hud {
   private el: HTMLElement;
@@ -93,7 +93,12 @@ export class Hud {
       ${row('grid', s.gridSpacing > 0 ? metres(s.gridSpacing) : 'off')}
       ${row('ground follow', s.groundFollow ? 'on' : 'off')}
       <div class="sep"></div>
-      ${row('veg tiles', `${s.veg.tiles}`)}
+      ${row(
+        'veg tiles',
+        s.veg.tiles >= MAX_VEG_TILES
+          ? `<span class="warn">${s.veg.tiles} AT CAP</span>`
+          : `${s.veg.tiles}`,
+      )}
       ${row('candidates', fmtCount(s.veg.candidates))}
       ${row(
         'instances',
