@@ -478,19 +478,45 @@ fn shadeTerrain(surf: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
   let hv = clamp(hgt / 2200.0, 0.0, 1.0) * 0.65 + slope * 0.7;
 
   if (hgt < 0.0) {
-    // Water: a dielectric, so almost all of what you see is reflected sky and
-    // a sun glint, not diffuse colour.
-    let depth = clamp(-hgt / 900.0, 0.0, 1.0);
-    let body = mix(vec3<f32>(0.024, 0.055, 0.062), vec3<f32>(0.004, 0.012, 0.026), depth);
+    // Water is a mirror with a little colour underneath, not a blue surface.
+    // Splitting reflected from transmitted by Fresnel is the whole thing: the
+    // previous version multiplied sun irradiance by Fresnel directly, so at
+    // grazing angles — i.e. most of any ocean view — it blew out to white.
     let v = normalize(-rel);
     let f0 = 0.02;
     let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(v, up), 0.0, 1.0), 5.0);
-    let hvec = normalize(v + sd);
-    let spec = pow(max(dot(up, hvec), 0.0), 900.0) * 2.4 * shadow;
+
+    // Actually sample the sky in the mirror direction. A constant blue is the
+    // reason CG oceans read as plastic: real water is bright at the horizon
+    // and dark overhead purely because of what it reflects.
+    let refl = reflect(-v, up);
+    let skyRefl = skyRadiance_T(wp, refl, sd, Rg, sunCol);
+
+    // Sun glint as a GGX lobe on a slightly rough surface, not a fixed power.
+    let hv = normalize(v + sd);
+    let rough = 0.062;
+    let a2 = rough * rough * rough * rough;
+    let nh = max(dot(up, hv), 0.0);
+    let dd = nh * nh * (a2 - 1.0) + 1.0;
+    let ggx = a2 / (3.14159265 * dd * dd);
+
     let sunTrW = transmit_T(sunDepth_T(wp, sd, Rg));
-    let skyW = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.05 + 0.6 * max(dot(up, sd), 0.0));
-    var wc = body * skyW * 3.0
-           + sunCol * sunTrW * (spec + fres * 0.35) * max(dot(up, sd), 0.0);
+    let sunUpW = max(dot(up, sd), 0.0);
+
+    // Only the transmitted fraction reaches the water body. Shallow water over
+    // a lit bed is green; deep water is nearly black.
+    let depth = clamp(-hgt / 45.0, 0.0, 1.0);
+    let body = mix(vec3<f32>(0.075, 0.175, 0.165), vec3<f32>(0.004, 0.019, 0.042), depth);
+    let skyAmb = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.045 + 0.6 * sunUpW);
+    let sub = body * (sunCol * sunTrW * sunUpW * (1.0 / 3.14159265) * shadow + skyAmb);
+
+    var wc = mix(sub, skyRefl, fres) + sunCol * sunTrW * ggx * fres * sunUpW * shadow;
+
+    // Surf line where the sea meets land. Crude — a depth band, no waves — but
+    // a coastline with no tonal change at all reads as a paint boundary.
+    let surf = (1.0 - smoothstep(0.0, 6.0, -hgt)) * smoothstep(-0.2, 1.5, -hgt);
+    wc = mix(wc, wc + sunCol * sunTrW * 0.035 * shadow, surf);
+
     wc = aerial_T(wc, camPos, wp, sd, Rg, sunCol);
     return mix(wc, gridCol, overlay * 0.85);
   }
