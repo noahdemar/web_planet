@@ -130,6 +130,14 @@ export const VEG_CELLS = 128;
 export const MAX_VEG_TILES = 32;
 
 /**
+ * vec4s per vegetation tile record. Five of geometry and precision data, plus
+ * one carrying the M3 bake sampled at the tile centre — elevation, its
+ * gradient, and wetness — so the scatter can reconstruct the baked surface
+ * linearly instead of fetching the cube map per candidate cell.
+ */
+export const VEG_TILE_VEC4 = 7;
+
+/**
  * Distance beyond which canopy becomes a terrain material, not objects.
  * Instance count grows with the square of this, and the far band is almost
  * entirely occluded by nearer trees at ground level, so it is bought at a poor

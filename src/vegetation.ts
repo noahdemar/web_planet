@@ -48,6 +48,7 @@ import {
 import {
   DEFAULT_OCTAVES,
   MAX_VEG_TILES,
+  VEG_TILE_VEC4,
   RADIUS,
   SEA_BAND,
   SEA_LEVEL,
@@ -127,7 +128,7 @@ export class Vegetation {
 
   /** Tile parameters: five vec4 per tile, rewritten by the CPU each frame. */
   private tileAttr = new StorageBufferAttribute(
-    new Float32Array(MAX_VEG_TILES * 5 * 4),
+    new Float32Array(MAX_VEG_TILES * VEG_TILE_VEC4 * 4),
     4,
   );
 
@@ -177,7 +178,7 @@ export class Vegetation {
       (this.argsAttr.array as Uint32Array)[b * ARGS] = b === 0 ? 18 : 6;
     }
 
-    const tiles = storage(this.tileAttr, 'vec4', MAX_VEG_TILES * 5).toReadOnly();
+    const tiles = storage(this.tileAttr, 'vec4', MAX_VEG_TILES * VEG_TILE_VEC4).toReadOnly();
     const insts = storage(this.instAttr, 'vec4', VEG_CAPACITY);
     const counters = storage(this.argsAttr, 'uint', BANDS * ARGS).toAtomic();
 
@@ -199,7 +200,7 @@ export class Vegetation {
       const cellId = instanceIndex.mod(uint(CELLS_SQ));
 
       {
-        const base = tile.mul(uint(5));
+        const base = tile.mul(uint(VEG_TILE_VEC4));
         const cell = vec2(
           float(cellId.mod(uint(VEG_CELLS))),
           float(cellId.div(uint(VEG_CELLS))),
@@ -212,6 +213,8 @@ export class Vegetation {
             t2: tiles.element(base.add(2)),
             t3: tiles.element(base.add(3)),
             t4: tiles.element(base.add(4)),
+            t5: tiles.element(base.add(5)),
+            t6: tiles.element(base.add(6)),
             cell,
             cfg: this.cfg,
             cfg2: this.cfg2,
@@ -362,7 +365,7 @@ export class Vegetation {
       return;
     }
 
-    (this.tileAttr.array as Float32Array).set(tileData.subarray(0, n * 20));
+    (this.tileAttr.array as Float32Array).set(tileData.subarray(0, n * VEG_TILE_VEC4 * 4));
     this.tileAttr.needsUpdate = true;
     this.vcfg.value.w = n;
 

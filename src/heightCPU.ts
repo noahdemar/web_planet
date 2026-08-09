@@ -3,25 +3,24 @@
  *
  * Value only — the GPU needs the gradient for normals, the CPU only needs the
  * elevation for camera ground-following. Kept deliberately in lockstep with
- * the shader: if you change one, change both.
+ * the shader: if you change one, change both. tools/mirror.ts measures the
+ * disagreement, so "in lockstep" is a number rather than an intention.
  *
- * The two will not agree bit-for-bit — this evaluates in f64, the shader in
- * f32 — but they agree to within a few centimetres, which is far inside the
- * camera's clearance margin. At M5 this is replaced by a read of the tile
- * cache, and the duplication disappears.
+ * The two will not agree bit-for-bit — this evaluates in f64, the shader's
+ * inputs are f32, and the baked term is bilinear here against the GPU's
+ * seamless cube filtering — but they agree to well inside the camera's
+ * clearance margin.
+ *
+ * The gradient noise below is *not* the shader's. It is used by the bake
+ * (plates.ts, relief.ts) for plate warping and base relief, where nothing has
+ * to match the GPU. The amplification further down uses shaderNoiseCPU.ts,
+ * which does.
  */
 
-import { type V3 } from './math/vec3d.js';
-import {
-  OCEAN_DEPTH,
-  RELIEF_BASE,
-  RELIEF_PEAK,
-  RELIEF_GAIN,
-  RELIEF_LACUNARITY,
-  RELIEF_POWER,
-  SEA_BAND,
-  SEA_LEVEL,
-} from './planet.js';
+import { normalize, type V3 } from './math/vec3d.js';
+import { FACE_EDGE, RADIUS, RELIEF_GAIN, RELIEF_LACUNARITY } from './planet.js';
+import { AMP_BASE, AMP_F0, AMP_RELIEF, RIDGE_MEAN, shaderNoise } from './shaderNoiseCPU.js';
+import { sampleSurface, type PlanetSurface } from './planetData.js';
 
 const U32 = 4294967296;
 
@@ -55,7 +54,7 @@ function hash33(ix: number, iy: number, iz: number, out: Float64Array): void {
 const g0 = new Float64Array(3);
 
 /** Gradient noise, value only. */
-function noise3(x: number, y: number, z: number): number {
+export function noise3(x: number, y: number, z: number): number {
   const px = Math.floor(x);
   const py = Math.floor(y);
   const pz = Math.floor(z);
@@ -108,95 +107,85 @@ const sstep = (e0: number, e1: number, x: number): number => {
 };
 
 /**
- * The two scale-separated fields the elevation is built from.
- *
- * Neither depends on sea level, which is what makes calibration cheap: the
- * tool evaluates these once and then sweeps sea level as pure arithmetic.
+ * The baked surface the CPU mirror sits on. Set once at startup by main.ts;
+ * `heightAt` throws without it rather than quietly returning a field the GPU
+ * is not drawing.
  */
-export interface Components {
-  /** Continentalness — decides land from ocean. */
-  cont: number;
-  /** Ridged relief in [0, 1]. */
-  ridge: number;
+let surface: PlanetSurface | null = null;
+
+export function setPlanetSurface(s: PlanetSurface): void {
+  surface = s;
 }
-
-export function componentsAt(
-  dir: V3,
-  octaves: number,
-  gain = RELIEF_GAIN,
-): Components {
-  let cAmp = 1;
-  let cFrq = 1.15;
-  let cSum = 0;
-  let cNorm = 0;
-  for (let i = 0; i < 4; i++) {
-    const o = i * 19.37;
-    cSum += cAmp * noise3(dir[0] * cFrq + o, dir[1] * cFrq + o, dir[2] * cFrq + o);
-    cNorm += cAmp;
-    cAmp *= 0.5;
-    cFrq *= 2.03;
-  }
-
-  let mAmp = 1;
-  let mFrq = 2.9;
-  let mSum = 0;
-  let mNorm = 0;
-  for (let i = 0; i < octaves; i++) {
-    const o = i * 7.77;
-    const n = noise3(dir[0] * mFrq + o, dir[1] * mFrq + o, dir[2] * mFrq + o);
-    const r = 1 - Math.abs(n);
-    mSum += mAmp * r * r;
-    mNorm += mAmp;
-    mAmp *= gain;
-    mFrq *= RELIEF_LACUNARITY;
-  }
-
-  return { cont: cSum / cNorm, ridge: mSum / mNorm };
-}
-
-/** The knobs `tools/hypsometry.ts` searches over. */
-export interface ReliefParams {
-  seaLevel: number;
-  base: number;
-  peak: number;
-  power: number;
-  oceanDepth: number;
-  band: number;
-}
-
-export const DEFAULT_RELIEF: ReliefParams = {
-  seaLevel: SEA_LEVEL,
-  base: RELIEF_BASE,
-  peak: RELIEF_PEAK,
-  power: RELIEF_POWER,
-  oceanDepth: OCEAN_DEPTH,
-  band: SEA_BAND,
-};
 
 /**
- * Compose the elevation. Must stay in lockstep with `height_*` in
- * shaders/terrain.ts — this is the function `tools/hypsometry.ts` calibrates.
+ * Elevation in metres above the reference sphere, for a unit direction.
  *
- * Ridged fBm has a mean near 0.56, so used raw it lifts the whole planet above
- * the snow line. Raising it to a power skews the distribution toward lowland,
- * which is what Earth's hypsometric curve looks like (SPEC.md §13).
+ * Must stay in lockstep with `height_N` in shaders/terrain.ts. The camera
+ * stands on what this returns, so a disagreement of a few metres is a camera
+ * that floats or sinks — which is why the amplification here uses the shader's
+ * own hash (shaderNoiseCPU.ts) rather than the one above.
+ *
+ * `bandLimit` defaults to the shader's finest, because the CPU is asked for
+ * the surface the player is standing on, which is always the fully detailed
+ * one.
  */
-export function compose(c: Components, p = DEFAULT_RELIEF, hscale = 1): number {
-  const mp = Math.pow(c.ridge, p.power);
-  const land = sstep(p.seaLevel - p.band, p.seaLevel + p.band, c.cont);
-  return (
-    (c.cont * p.base + mp * land * land * p.peak + (1 - land) * p.oceanDepth) * hscale
-  );
-}
-
-/** Elevation in metres above the reference sphere, for a unit direction. */
 export function heightAt(
   dir: V3,
   octaves: number,
   hscale = 1,
-  seaLevel = SEA_LEVEL,
+  bandLimit = 1e9,
 ): number {
-  const p = seaLevel === SEA_LEVEL ? DEFAULT_RELIEF : { ...DEFAULT_RELIEF, seaLevel };
-  return compose(componentsAt(dir, octaves), p, hscale);
-}
+  if (!surface) throw new Error('heightAt: call setPlanetSurface() first');
 
+  const { elevation: bakeH, wetness } = sampleSurface(surface, dir[0], dir[1], dir[2]);
+
+  // Baked slope by the same one-cell central difference the shader uses. The
+  // tangent frame here is arbitrary — unlike the shader there is no face basis
+  // to hand — so pick the axis least aligned with dir and orthogonalise.
+  const e = FACE_EDGE / surface.size / RADIUS;
+  const ax = Math.abs(dir[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  let t1: V3 = [
+    ax[0] - dir[0] * (ax[0] * dir[0] + ax[1] * dir[1] + ax[2] * dir[2]),
+    ax[1] - dir[1] * (ax[0] * dir[0] + ax[1] * dir[1] + ax[2] * dir[2]),
+    ax[2] - dir[2] * (ax[0] * dir[0] + ax[1] * dir[1] + ax[2] * dir[2]),
+  ];
+  t1 = normalize(t1);
+  const t2: V3 = normalize([
+    dir[1] * t1[2] - dir[2] * t1[1],
+    dir[2] * t1[0] - dir[0] * t1[2],
+    dir[0] * t1[1] - dir[1] * t1[0],
+  ]);
+  const along = (t: V3, sgn: number): number => {
+    const d = normalize([dir[0] + t[0] * e * sgn, dir[1] + t[1] * e * sgn, dir[2] + t[2] * e * sgn]);
+    return sampleSurface(surface!, d[0], d[1], d[2]).elevation;
+  };
+  const gx = (along(t1, 1) - along(t1, -1)) / (2 * e);
+  const gy = (along(t2, 1) - along(t2, -1)) / (2 * e);
+  const slope = Math.hypot(gx, gy) / RADIUS;
+
+  const relief = sstep(0.006, 0.085, slope);
+  const landW = sstep(-350, 40, bakeH);
+  const valley = sstep(7.5, 10.5, wetness);
+  const amp = (AMP_BASE + AMP_RELIEF * relief) * (0.22 + 0.78 * landW) * (1 - 0.72 * valley);
+
+  let mAmp = 1;
+  let mFrq = AMP_F0;
+  let mSum = 0;
+  let mNorm = 0;
+  let mBias = 0;
+  for (let i = 0; i < octaves; i++) {
+    const w = sstep(1, 2.5, bandLimit / mFrq);
+    if (w > 0.002) {
+      const o = i * 7.77;
+      const n = shaderNoise(dir[0] * mFrq + o, dir[1] * mFrq + o, dir[2] * mFrq + o);
+      const r = 1 - Math.abs(n);
+      mSum += w * mAmp * r * r;
+      mBias += w * mAmp * RIDGE_MEAN;
+    }
+    mNorm += mAmp;
+    mAmp *= RELIEF_GAIN;
+    mFrq *= RELIEF_LACUNARITY;
+  }
+
+  return (bakeH + ((mSum - mBias) / mNorm) * amp) * hscale;
+}

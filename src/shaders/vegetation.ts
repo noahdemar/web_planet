@@ -32,7 +32,7 @@ import { VEG_MAX_SLOPE } from '../planet.js';
  */
 export const vegSample = wgslFn(/* wgsl */ `
 fn vegSample(t0: vec4<f32>, t1: vec4<f32>, t2: vec4<f32>,
-             t3: vec4<f32>, t4: vec4<f32>,
+             t3: vec4<f32>, t4: vec4<f32>, t5: vec4<f32>, t6: vec4<f32>,
              cell: vec2<f32>, cfg: vec4<f32>, cfg2: vec4<f32>,
              vcfg: vec4<f32>) -> vec4<f32> {
   let A = t0.x;
@@ -75,7 +75,13 @@ fn vegSample(t0: vec4<f32>, t1: vec4<f32>, t2: vec4<f32>,
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
   }
 
-  let hn = height_V(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y, fullBand);
+  // The bake, reconstructed linearly from the tile-centre sample. t5 is
+  // (elevation, gradient) and t6.x is wetness, all evaluated on the CPU at
+  // dirC. The bake varies over 18 km and this tile is a few hundred metres, so
+  // a first-order expansion about the tile centre is accurate to centimetres —
+  // and it costs nothing, against five cube-map fetches per candidate.
+  let bakeH = t5.x + dot(t5.yzw, dd);
+  let hn = height_V(dir, i32(cfg.z), cfg.y, bakeH, t5.yzw, t6.x, cfg.x, fullBand);
   let h = hn.x;
 
   // Surface normal from the tangential height gradient, as in the terrain

@@ -42,11 +42,8 @@
 
 import { wgslFn } from 'three/tsl';
 import {
-  OCEAN_DEPTH,
-  RELIEF_BASE,
   RELIEF_GAIN,
   RELIEF_LACUNARITY,
-  RELIEF_PEAK,
   VEG_MAX_SLOPE,
   VEG_MIN_ELEVATION,
   VEG_TREELINE,
@@ -124,6 +121,36 @@ fn morphed_${s}(gpos: vec2<f32>, gpar: vec3<f32>, A: f32, B: f32, hs: f32,
 }
 
 /** Noise, its analytic derivative, and the elevation field. Expensive. */
+/**
+ * Frequency at which amplification starts, in cycles per unit direction —
+ * wavelength is RADIUS/f. The bake resolves 18 km cells, so its Nyquist is
+ * f = 177 and the band from there to 354 is already attenuated by the resample.
+ * Starting a little below 354 puts detail back into that attenuated band
+ * rather than double-counting it.
+ */
+const AMP_F0 = 260;
+
+/**
+ * Mean of (1 − |noise|)² for this gradient noise, measured by
+ * tools/ridgeMean.ts. Subtracted per octave so switching octaves on and off
+ * with distance cannot move the coastline.
+ */
+const RIDGE_MEAN = 0.7452;
+
+/**
+ * Amplification amplitude, metres: a floor everywhere plus a term scaled by
+ * the relief the bake already resolves.
+ *
+ * These are large because the ridged sum they multiply is small. Summing 17
+ * octaves at gain 0.62 and dividing by the unweighted normaliser leaves a
+ * signal of roughly ±0.1, so an amplitude of 1450 produced about ±145 m of
+ * sub-grid relief in the steepest terrain and 2 m as a planet-wide average.
+ * Standing on it, that is a flat green plain to the horizon. Real sub-18 km
+ * relief in a mountain belt is well over a kilometre.
+ */
+const AMP_BASE = 70;
+const AMP_RELIEF = 7800;
+
 export function field(s: string): string {
   return /* wgsl */ `
 
@@ -207,11 +234,28 @@ fn sstepd_${s}(e0: f32, e1: f32, x: f32) -> vec2<f32> {
   return vec2<f32>(v, d);
 }
 
-// Elevation in metres, plus its gradient with respect to the unit direction.
-// M1 placeholder: continents + ridged relief. Replaced at M5/M6 by tile
-// sampling plus context-modulated amplification (SPEC.md §6).
 /**
- * Elevation and its gradient.
+ * Elevation and its gradient: the baked surface plus amplification.
+ *
+ * The coarse structure no longer comes from noise. bakeH and bakeG are
+ * sampled from the M3 global bake — tectonics, erosion and drainage solved on
+ * a 1.57 M cell sphere (SPEC.md §4) — and all this adds is the detail finer
+ * than the bake's 18 km cell, which is the amplification half of SPEC.md §6.
+ *
+ * That division is what the old placeholder could not express. Ridged fBm
+ * raised to the 7th power can be tuned to Earth's *hypsometric curve* while
+ * still having no rivers, no ranges and no reason for high ground to be where
+ * it is, because there is no upstream anything in a local function.
+ *
+ * Two things condition the amplification, both from the bake:
+ *
+ *   slope    sub-grid roughness tracks resolved relief. A floodplain is flat
+ *            at every scale; a range is rough at every scale. Using one
+ *            amplitude everywhere is what made the old field read as noise.
+ *   wetness  log₁₀ upstream drainage area. Amplitude falls in valley floors,
+ *            so trunk rivers keep a smooth corridor instead of having ridges
+ *            dropped across them — the amplification has to *respect* the
+ *            drainage it is sitting on, or it destroys it.
  *
  * bandLimit is radius / vertex-spacing. Octaves finer than the mesh can
  * represent are faded out rather than evaluated: at LOD 10 the mesh samples
@@ -223,23 +267,23 @@ fn sstepd_${s}(e0: f32, e1: f32, x: f32) -> vec2<f32> {
  * surface, not rescale what is left, or the terrain would change shape as you
  * approached it (SPEC.md I2).
  */
-fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32, sea: f32, band: f32,
-               bandLimit: f32) -> vec4<f32> {
-  var cAmp = 1.0; var cFrq = 1.15; var cSum = 0.0;
-  var cG = vec3<f32>(0.0); var cNorm = 0.0;
-  for (var i = 0; i < 4; i = i + 1) {
-    let n = noised_${s}(dir * cFrq + vec3<f32>(f32(i) * 19.37));
-    cSum  = cSum + cAmp * n.x;
-    cG    = cG + cAmp * cFrq * n.yzw;
-    cNorm = cNorm + cAmp;
-    cAmp = cAmp * 0.5;
-    cFrq = cFrq * 2.03;
-  }
-  cSum = cSum / cNorm;
-  cG = cG / cNorm;
+fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
+               bakeH: f32, bakeG: vec3<f32>, wet: f32,
+               radius: f32, bandLimit: f32) -> vec4<f32> {
+  // dh/ds where s is arc length: the gradient is per unit direction, and a
+  // unit of direction is one planet radius of surface.
+  let slope = length(bakeG) / radius;
 
-  var mAmp = 1.0; var mFrq = 2.9; var mSum = 0.0;
-  var mG = vec3<f32>(0.0); var mNorm = 0.0;
+  let relief = smoothstep(0.006, 0.085, slope);
+  let landW = smoothstep(-350.0, 40.0, bakeH);
+  // Trunk valleys: 10^10 m² is a continental river, 10^7.5 a headwater.
+  let valley = smoothstep(7.5, 10.5, wet);
+  let amp = (${AMP_BASE}.0 + ${AMP_RELIEF}.0 * relief)
+          * mix(0.22, 1.0, landW)
+          * mix(1.0, 0.28, valley);
+
+  var mAmp = 1.0; var mFrq = ${AMP_F0}.0; var mSum = 0.0;
+  var mG = vec3<f32>(0.0); var mNorm = 0.0; var mBias = 0.0;
   for (var i = 0; i < oct; i = i + 1) {
     // Full weight while the wavelength spans 2.5 samples, zero by 1.
     let w = smoothstep(1.0, 2.5, bandLimit / mFrq);
@@ -249,36 +293,25 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32, sea: f32, band: f32,
       let r = 1.0 - abs(n.x);
       mSum  = mSum + w * mAmp * r * r;
       mG    = mG - w * mAmp * 2.0 * r * sg * mFrq * n.yzw;
+      // r² has a positive mean, so the octaves that are switched on would
+      // otherwise raise the ground by an amount that changes with distance —
+      // moving the coastline as you fly toward it. Track the bias of exactly
+      // the octaves in play and remove it.
+      mBias = mBias + w * mAmp * ${RIDGE_MEAN};
     }
     // Unweighted: the normaliser must not change with the band limit.
     mNorm = mNorm + mAmp;
     mAmp = mAmp * ${RELIEF_GAIN};
     mFrq = mFrq * ${RELIEF_LACUNARITY};
   }
-  mSum = mSum / mNorm;
-  mG = mG / mNorm;
+  let detail = (mSum - mBias) / mNorm;
+  let detailG = mG / mNorm;
 
-  // Ridged fBm has a mean near 0.56, so used raw it lifts the whole planet
-  // above the snow line. The 7th power skews relief toward lowland, matching
-  // Earth's hypsometric curve — calibrated by tools/hypsometry.ts (SPEC.md §13).
-  let m2 = mSum * mSum;
-  let m3 = m2 * mSum;
-  let m6 = m3 * m3;
-  let mp = m6 * mSum;
-  let mpG = mG * 7.0 * m6;
-
-  let ls = sstepd_${s}(sea - band, sea + band, cSum);
-  let land = ls.x;
-  let landG = cG * ls.y;
-
-  let h = (cSum * ${RELIEF_BASE}.0
-        + mp * land * land * ${RELIEF_PEAK}.0
-        + (1.0 - land) * (${OCEAN_DEPTH}.0)) * hscale;
-
-  // product rule through  mp·land²  and  (1-land)·oceanDepth
-  let g = (cG * ${RELIEF_BASE}.0
-        + (mpG * land * land + mp * 2.0 * land * landG) * ${RELIEF_PEAK}.0
-        - landG * (${OCEAN_DEPTH}.0)) * hscale;
+  let h = (bakeH + detail * amp) * hscale;
+  // The amplitude field varies over the bake's cell size, three orders of
+  // magnitude coarser than the detail it scales, so d(amp)/d(dir) is
+  // negligible next to amp·d(detail)/d(dir) and is dropped.
+  let g = (bakeG + detailG * amp) * hscale;
 
   return vec4<f32>(h, g);
 }
@@ -341,8 +374,74 @@ const UNPACK = `
  * (normal.xyz, elevation). Carries the whole cost of the noise field; the node
  * is reused by both the position and the fragment stage, so it runs once.
  */
+/**
+ * Unit direction and vertex spacing for this vertex.
+ *
+ * Exists purely so the bake can be sampled *before* `patchSurface` runs.
+ * Texture reads cannot happen inside a `wgslFn` — TSL has no way to bind a
+ * texture to one — so the sampling is done in the node graph and the results
+ * are passed in. The morph is therefore evaluated once more per vertex, which
+ * is about twenty ALU ops against the hundreds the noise field costs.
+ */
+/**
+ * Direction to atlas UV: the third and last copy of the cube-face mapping.
+ *
+ * The other two are `cubeTexelDirection` in bake/cubemap.ts, which writes the
+ * atlas, and `faceCoords` in planetData.ts, which reads it on the CPU. All
+ * three must agree; tools/mirror.ts is what proves the CPU and the asset do,
+ * and the terrain simply looking correct is what proves this one does.
+ *
+ * atlas is (faceSize, atlasWidth, atlasHeight, pad).
+ */
+export const cubeAtlasUV = wgslFn(/* wgsl */ `
+fn cubeAtlasUV(dir: vec3<f32>, atlas: vec4<f32>) -> vec2<f32> {
+  let a = abs(dir);
+  var face: i32;
+  var sc: f32;
+  var tc: f32;
+  var ma: f32;
+  if (a.x >= a.y && a.x >= a.z) {
+    ma = a.x;
+    if (dir.x > 0.0) { face = 0; sc = -dir.z; } else { face = 1; sc = dir.z; }
+    tc = -dir.y;
+  } else if (a.y >= a.z) {
+    ma = a.y;
+    if (dir.y > 0.0) { face = 2; tc = dir.z; } else { face = 3; tc = -dir.z; }
+    sc = dir.x;
+  } else {
+    ma = a.z;
+    if (dir.z > 0.0) { face = 4; sc = dir.x; } else { face = 5; sc = -dir.x; }
+    tc = -dir.y;
+  }
+
+  let n = atlas.x;
+  let pad = atlas.w;
+  let cell = n + 2.0 * pad;
+  let col = f32(face % 3);
+  let row = f32(face / 3);
+  let s = (sc / ma + 1.0) * 0.5;
+  let t = (tc / ma + 1.0) * 0.5;
+  // Texel centres: the face occupies [pad, pad+n) of its cell, and the border
+  // ring outside that carries the neighbouring face so filtering at s or t
+  // exactly 0 or 1 blends across the seam instead of clamping.
+  return vec2<f32>((col * cell + pad + s * n) / atlas.y,
+                   (row * cell + pad + t * n) / atlas.z);
+}
+`);
+
+export const patchDirection = wgslFn(/* wgsl */ `
+fn patchDirection(${ARGS}) -> vec4<f32> {
+  ${UNPACK}
+  let m = morphed_D(gpos, gpar, A, B, hs, Pc, lenPc, iBU, iBV,
+                    anchorRel, radius, cfg2.z, iMorph, cfg.w);
+  let dd = offset_D(m.xy, A, B, hs, Pc, lenPc, iBU, iBV);
+  return vec4<f32>(dirC + dd, cfg2.w * hs * (1.0 + m.z));
+}
+${geom('D')}
+`);
+
 export const patchSurface = wgslFn(/* wgsl */ `
-fn patchSurface(${ARGS}) -> vec4<f32> {
+fn patchSurface(${ARGS}, baked: vec4<f32>, bake2: vec4<f32>) -> vec4<f32> {
   ${UNPACK}
   let m = morphed_N(gpos, gpar, A, B, hs, Pc, lenPc, iBU, iBV,
                     anchorRel, radius, cfg2.z, iMorph, cfg.w);
@@ -356,7 +455,8 @@ fn patchSurface(${ARGS}) -> vec4<f32> {
   let spacing = cfg2.w * hs * (1.0 + m.z);
   let bandLimit = radius / max(spacing, 0.01);
 
-  let hn = height_N(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y, bandLimit);
+  let hn = height_N(dir, i32(cfg.z), cfg.y, baked.x, baked.yzw, bake2.x,
+                    radius, bandLimit);
 
   // Surface normal from the tangential component of the height gradient.
   let gT = hn.yzw - dir * dot(dir, hn.yzw);
@@ -562,7 +662,14 @@ fn shadeTerrain(surf: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
   // shadowed. Without it a cast shadow goes almost black, which is the single
   // clearest tell that a renderer has direct light and nothing else — real
   // shadows are filled by everything around them.
-  let bounce = alb * alb * sunCol * sunTr * sunUp * 0.55;
+  //
+  // Written as a fraction of the direct term, not as its own light. The
+  // previous form omitted the 1/pi and so returned pi times more than a
+  // Lambertian surface can reflect — for snow it was 2.5x the direct term,
+  // which is why every snowfield clipped to flat white however the exposure
+  // was set. Physically this is the multiple-scatter enhancement a/(1-a)
+  // truncated to its first useful order: about +25% for snow, +5% for forest.
+  let bounce = alb * alb * (1.0 / 3.14159265) * sunCol * sunTr * sunUp * 0.42;
 
   var col = direct + ambient + bounce;
   col = aerial_T(col, camPos, wp, sd, Rg, sunCol);

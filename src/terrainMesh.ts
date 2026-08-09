@@ -18,7 +18,18 @@ import {
   Vector4,
 } from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { attribute, dot as tslDot, float, uniform, varying, vec3, vec4 } from 'three/tsl';
+import {
+  attribute,
+  cross,
+  texture,
+  dot as tslDot,
+  float,
+  normalize,
+  uniform,
+  varying,
+  vec3,
+  vec4,
+} from 'three/tsl';
 import {
   DEFAULT_OCTAVES,
   MAX_PATCHES,
@@ -31,7 +42,15 @@ import {
   SEA_LEVEL,
 } from './planet.js';
 import type { PatchBuffers } from './quadtree.js';
-import { patchPosition, patchSurface, shadeTerrain } from './shaders/terrain.js';
+import type { PlanetSurface } from './planetData.js';
+import { ATLAS_PAD } from './bake/cubemap.js';
+import {
+  cubeAtlasUV,
+  patchDirection,
+  patchPosition,
+  patchSurface,
+  shadeTerrain,
+} from './shaders/terrain.js';
 
 export type ShadeMode = 0 | 1 | 2 | 3 | 4 | 5;
 
@@ -45,6 +64,36 @@ type Vec3Node = ReturnType<typeof vec3>;
 type Vec4Node = ReturnType<typeof vec4>;
 const asVec3 = (n: unknown): Vec3Node => n as Vec3Node;
 const asVec4 = (n: unknown): Vec4Node => n as Vec4Node;
+
+/**
+ * The TSL node surface the bake-sampling block relies on.
+ *
+ * TSL's own types are exact about which builder produced a node, so chaining
+ * `.sub().mul().div()` across `attribute`, `cubeTexture` and `wgslFn` results
+ * does not type-check even though every one of those operations is valid.
+ * Same approach as shaders/shadowSample.ts: state what is used rather than
+ * reaching for `any`, and keep every cast in the five wrappers below.
+ */
+interface N {
+  add(x: unknown): N;
+  sub(x: unknown): N;
+  mul(x: unknown): N;
+  div(x: unknown): N;
+  level(x: unknown): N;
+  readonly r: N;
+  readonly g: N;
+  readonly xyz: N;
+}
+const n = (x: unknown): N => x as N;
+/** wgslFn's declared parameter type does not admit a named-argument object. */
+const nCall = (f: unknown, a: Record<string, unknown>): N =>
+  n((f as (x: Record<string, unknown>) => unknown)(a));
+const nNormalize = (x: N): N => n(normalize(x as never));
+const nCross = (a: N, b: N): N => n(cross(a as never, b as never));
+const nDot = (a: N, b: N): N => n(tslDot(a as never, b as never));
+const nVec4 = (...xs: unknown[]): N => n((vec4 as (...a: unknown[]) => unknown)(...xs));
+const nTex = (t: unknown, uv: N): N =>
+  n((texture as (a: unknown, b: unknown) => unknown)(t, uv));
 
 /**
  * Patch grid plus a one-cell skirt ring.
@@ -142,7 +191,17 @@ export class TerrainMesh {
   private mode = uniform(0);
   private gridSpacing = uniform(0);
 
-  constructor(buffers: PatchBuffers, shadowFactor?: ShadowFactor) {
+  /**
+   * Angular size of one bake cell, radians. The finite-difference step for the
+   * baked gradient; see the sampling block in the constructor.
+   */
+  private bakeStep = uniform(0.0028);
+
+  constructor(buffers: PatchBuffers, surface: PlanetSurface, shadowFactor?: ShadowFactor) {
+    // FACE_EDGE/size is the cell's arc length; divide by the radius for the
+    // angle. Derived rather than hard-coded so changing the bake resolution
+    // cannot silently leave the normals sampling the wrong stencil.
+    this.bakeStep.value = FACE_EDGE / surface.size / RADIUS;
     this.geometry = buildGrid();
 
     const inst = (name: string, arr: Float32Array, size: number) => {
@@ -178,9 +237,50 @@ export class TerrainMesh {
       cfg3: this.cfg3,
     };
 
+    // ── Sampling the M3 bake ────────────────────────────────────────────
+    //
+    // A texture cannot be bound to a wgslFn — TSL has no way to pass one in —
+    // so the bake is read here in the node graph and handed to `patchSurface`
+    // as plain vectors. That needs the vertex's direction before the surface
+    // is evaluated, which is what `patchDirection` exists for.
+    const dirSp = n(patchDirection(args));
+    const dir = dirSp.xyz;
+    const iBUn = n(attribute('iBU', 'vec3'));
+
+    // Tangent frame for the finite difference. The patch's own face basis is
+    // used rather than a fixed world axis because it cannot be parallel to a
+    // direction inside its own face — no pole case, no branch.
+    const t1 = nNormalize(iBUn.sub(dir.mul(nDot(dir, iBUn))));
+    const t2 = nCross(dir, t1);
+
+    const atlas = uniform(
+      new Vector4(surface.size, surface.width, surface.height, ATLAS_PAD),
+    );
+    const sampleBake = (d: N): N =>
+      nTex(surface.texture, nCall(cubeAtlasUV, { dir: d, atlas })).level(0);
+
+    // One bake cell. A shorter step would only read the slope of the bilinear
+    // interpolant, which is piecewise constant, so the normals would facet
+    // along cell boundaries.
+    const e = n(this.bakeStep);
+    const twoE = e.mul(2);
+    const step1 = t1.mul(e);
+    const step2 = t2.mul(e);
+    const centre = sampleBake(dir);
+    const gx = sampleBake(nNormalize(dir.add(step1)))
+      .r.sub(sampleBake(nNormalize(dir.sub(step1))).r)
+      .div(twoE);
+    const gy = sampleBake(nNormalize(dir.add(step2)))
+      .r.sub(sampleBake(nNormalize(dir.sub(step2))).r)
+      .div(twoE);
+    const bakeGrad = t1.mul(gx).add(t2.mul(gy));
+
+    const baked = nVec4(centre.r, bakeGrad);
+    const bake2 = nVec4(centre.g, float(0), float(0), float(0));
+
     // One expensive evaluation, reused: the same node feeds both the vertex
     // position and the fragment stage, so the noise runs once per vertex.
-    const surf = asVec4(patchSurface(args));
+    const surf = asVec4(nCall(patchSurface, { ...args, baked, bake2 }));
     const position = asVec3(patchPosition({ ...args, hgt: surf.z }));
 
     const surfV = varying(surf, 'vSurf');

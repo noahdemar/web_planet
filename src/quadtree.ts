@@ -22,6 +22,8 @@ import {
   MAX_LEVEL,
   MAX_PATCHES,
   MAX_VEG_TILES,
+  VEG_TILE_VEC4,
+  FACE_EDGE,
   MIN_ELEVATION,
   morphStartFor,
   RADIUS,
@@ -30,7 +32,8 @@ import {
   edgeLengthAt,
 } from './planet.js';
 import { FACES, cubePoint, warp } from './cubesphere.js';
-import { type V3, dot, len, normalize, sub } from './math/vec3d.js';
+import { type V3, addScaled, cross, dot, len, normalize, sub } from './math/vec3d.js';
+import { sampleSurface, type PlanetSurface } from './planetData.js';
 
 export interface SelectStats {
   patches: number;
@@ -84,7 +87,7 @@ export class PatchSelector {
    * node at VEG_LEVEL within VEG_RANGE is necessarily visited, because
    * range[VEG_LEVEL-1] is more than twice VEG_RANGE.
    */
-  readonly vegTileData = new Float32Array(MAX_VEG_TILES * 5 * 4);
+  readonly vegTileData = new Float32Array(MAX_VEG_TILES * VEG_TILE_VEC4 * 4);
   private vegCount = 0;
 
   /** range[L]: a node subdivides while the camera is nearer than this. */
@@ -102,6 +105,13 @@ export class PatchSelector {
   private count = 0;
   private maxLevelCap = MAX_LEVEL;
   private distanceCap = Infinity;
+
+  /** The M3 bake. Sampled per vegetation tile; see emitVegTile. */
+  private surface: PlanetSurface | null = null;
+
+  setPlanetSurface(s: PlanetSurface): void {
+    this.surface = s;
+  }
 
   constructor(lodFactor: number) {
     this.setLodFactor(lodFactor);
@@ -288,7 +298,7 @@ export class PatchSelector {
     lenPc: number,
   ): void {
     if (this.vegCount >= MAX_VEG_TILES) return;
-    const o = this.vegCount++ * 20;
+    const o = this.vegCount++ * VEG_TILE_VEC4 * 4;
     const t = this.vegTileData;
     const { U, V } = FACES[face];
 
@@ -320,6 +330,40 @@ export class PatchSelector {
     t[o + 17] = V[1];
     t[o + 18] = V[2];
     t[o + 19] = tj;
+
+    // The M3 bake, sampled once for the whole tile.
+    //
+    // The scatter needs the baked elevation to stand trees on the ground, but
+    // the bake resolves 18 km cells and this tile is a few hundred metres
+    // across — the field is very nearly linear over it. So one value and one
+    // gradient here replace five cube-map fetches per candidate cell, and
+    // there are ~500 k candidates a frame.
+    if (this.surface) {
+      const b = sampleSurface(this.surface, dirC[0], dirC[1], dirC[2]);
+      const e = FACE_EDGE / this.surface.size / RADIUS;
+      const at = (ax: V3, sg: number): number => {
+        const d = normalize([
+          dirC[0] + ax[0] * e * sg,
+          dirC[1] + ax[1] * e * sg,
+          dirC[2] + ax[2] * e * sg,
+        ]);
+        return sampleSurface(this.surface!, d[0], d[1], d[2]).elevation;
+      };
+      // U and V are tangent to the face, so they are never parallel to dirC
+      // inside it — the same frame the terrain shader differences along.
+      const tu = normalize(addScaled(U, dirC, -dot(U, dirC)));
+      const tv = normalize(cross(dirC, tu));
+      const gu = (at(tu, 1) - at(tu, -1)) / (2 * e);
+      const gv = (at(tv, 1) - at(tv, -1)) / (2 * e);
+      t[o + 20] = b.elevation;
+      t[o + 21] = tu[0] * gu + tv[0] * gv;
+      t[o + 22] = tu[1] * gu + tv[1] * gv;
+      t[o + 23] = tu[2] * gu + tv[2] * gv;
+      t[o + 24] = b.wetness;
+      t[o + 25] = 0;
+      t[o + 26] = 0;
+      t[o + 27] = 0;
+    }
   }
 
   private emit(

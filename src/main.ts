@@ -9,6 +9,9 @@
 import { ACESFilmicToneMapping, PerspectiveCamera, Scene, Vector3 } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { DEFAULT_LOD_FACTOR, MAX_LEVEL, RADIUS } from './planet.js';
+import { loadPlanetSurface } from './planetData.js';
+import { AutoExposure } from './exposure.js';
+import { setPlanetSurface } from './heightCPU.js';
 import { PatchSelector } from './quadtree.js';
 import { TerrainMesh, type ShadeMode } from './terrainMesh.js';
 import { FlyControls } from './controls.js';
@@ -78,8 +81,15 @@ async function main(): Promise<void> {
   const shadowFactor = makeShadowFactor(shadowU, shadows);
   const shadowOf = (rel: unknown) => shadowFactor(rel as never) as never;
 
+  // The M3 bake. Everything the terrain draws sits on top of this, so it is
+  // loaded before anything is built rather than streamed in — a planet whose
+  // continents appear a second late is worse than a slightly longer start.
+  const surface = await loadPlanetSurface();
+
   const selector = new PatchSelector(DEFAULT_LOD_FACTOR);
-  const terrain = new TerrainMesh(selector.buffers, shadowOf);
+  selector.setPlanetSurface(surface);
+  setPlanetSurface(surface);
+  const terrain = new TerrainMesh(selector.buffers, surface, shadowOf);
   scene.add(terrain.mesh);
 
   const sky = new Sky();
@@ -163,6 +173,10 @@ async function main(): Promise<void> {
         sunAz = (sunAz + (e.shiftKey ? -12 : 12)) % 360;
         aimSun(sunEl, sunAz);
         break;
+      case 'KeyK':
+        sunFollow = !sunFollow;
+        if (sunFollow) aimSun(sunEl, sunAz);
+        break;
       case 'KeyH':
         shadowsOn = !shadowsOn;
         break;
@@ -202,6 +216,16 @@ async function main(): Promise<void> {
 
     controls.setTerrain(terrain.octaves, terrain.heightScale);
     controls.update(dt, camera);
+    if (sunFollow) aimSun(sunEl, sunAz);
+
+    // Meter before rendering, from this frame's camera.
+    {
+      const p = controls.pos;
+      const inv = 1 / Math.hypot(p[0], p[1], p[2]);
+      const dotUp = (sun.x * p[0] + sun.y * p[1] + sun.z * p[2]) * inv;
+      exposure.update(dotUp, controls.groundRadius - RADIUS, controls.altitude, dt);
+      renderer.toneMappingExposure = exposure.value;
+    }
 
     // Near/far track altitude: at eye height the near plane is centimetres,
     // from orbit it is kilometres. Far reaches past the geometric horizon so
@@ -360,7 +384,23 @@ async function main(): Promise<void> {
 
   let sunEl = 38;
   let sunAz = 130;
+  /**
+   * Re-aim the sun from the camera's own local up every frame.
+   *
+   * With a world-fixed sun most of the planet is in darkness, and travelling
+   * anywhere means arriving at night — every location visited during the audit
+   * needed the sun aimed by hand before it could even be assessed. Following
+   * the camera keeps `sunEl` meaning what it says: degrees above *your*
+   * horizon. It still produces a terminator from orbit, because at altitude
+   * the local up is the sub-camera point and the sun is 38° off it.
+   *
+   * Press K for a world-fixed sun, which is what you want to watch a real
+   * terminator sweep, and wrong for everything else.
+   */
+  let sunFollow = true;
   aimSun(sunEl, sunAz);
+
+  const exposure = new AutoExposure();
 
   // Handle for driving the sim from the devtools console.
   Object.assign(window, {
