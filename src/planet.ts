@@ -184,5 +184,9 @@ export const VEG_FADE_START = VEG_RANGE * 0.45;
  */
 export const VEG_TILE_RANGE = VEG_RANGE + 120;
 
-/** Quads thinner than this many pixels only alias; fade them out instead. */
-export const VEG_MIN_PIXELS = 2.5;
+/**
+ * Quads thinner than this many pixels only alias; fade them out instead.
+ * Alpha-to-coverage resolves the crown *outline*, but a whole crown narrower
+ * than a few pixels still crawls between frames however it is filtered.
+ */
+export const VEG_MIN_PIXELS = 4.5;

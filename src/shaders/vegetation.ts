@@ -67,12 +67,15 @@ fn vegSample(t0: vec4<f32>, t1: vec4<f32>, t2: vec4<f32>,
   // Cheap conservative reject: cover can only be reduced by the growth gates
   // below, so anything failing against clump*density alone can never pass.
   // Three noise octaves here save seventeen there.
-  let clump = forestClump_V(dir);
+  // Full band: instances only survive within ~1 km, where the mesh is at its
+  // finest levels anyway, so the surface they stand on is not band-limited.
+  let fullBand = cfg.x / 0.4;
+  let clump = forestClump_V(dir, fullBand);
   if (u > clump * density) {
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
   }
 
-  let hn = height_V(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y);
+  let hn = height_V(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y, fullBand);
   let h = hn.x;
 
   // Surface normal from the tangential height gradient, as in the terrain
@@ -84,7 +87,7 @@ fn vegSample(t0: vec4<f32>, t1: vec4<f32>, t2: vec4<f32>,
   // Accept against exactly the cover the terrain shader tints the ground with,
   // using the same hash sample. Instance density and ground colour are then
   // the same function, which is what lets one dissolve into the other.
-  let cover = forestCover_V(dir, h, slope, density);
+  let cover = forestCover_V(dir, h, slope, density, fullBand);
   if (u > cover) {
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
   }
@@ -149,7 +152,7 @@ fn billboard(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>,
 export const shadeVegetation = wgslFn(/* wgsl */ `
 fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
                    sunDir: vec3<f32>, sunCol: vec3<f32>,
-                   band: f32, mode: f32, cfg: vec4<f32>) -> vec3<f32> {
+                   band: f32, mode: f32, cfg: vec4<f32>) -> vec4<f32> {
   // Soft crown mask so the quad does not read as a rectangle, with a hashed
   // aspect so neighbouring crowns are not identical silhouettes.
   let v = fract(inst.x * 0.013 + inst.z * 0.029 + inst.w * 0.17);
@@ -158,14 +161,18 @@ fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
   let crown = 1.0 - smoothstep(0.5, 1.0, dot(d, d));
   let trunk = (1.0 - smoothstep(0.030, 0.062, abs(uv.x - 0.5))) *
               (1.0 - smoothstep(0.26, 0.40, uv.y));
-  let alpha = clamp(max(crown, trunk), 0.0, 1.0);
-  if (alpha < 0.4) { discard; }
+  // Analytic edge width, so the crown outline resolves against MSAA coverage
+  // instead of stair-stepping and crawling.
+  let raw = max(crown, trunk);
+  let aa = max(fwidth(raw), 1e-4);
+  let alpha = clamp((raw - 0.42) / aa + 0.5, 0.0, 1.0);
+  if (alpha < 0.02) { discard; }
 
   if (mode > 0.5) {
     let c = select(select(vec3<f32>(0.95, 0.25, 0.85),
                           vec3<f32>(0.95, 0.65, 0.15), band < 1.5),
                    vec3<f32>(0.25, 0.85, 0.35), band < 0.5);
-    return c;
+    return vec4<f32>(c, alpha);
   }
 
   let Rg = cfg.x;
@@ -200,7 +207,7 @@ fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
   var col = direct + alb * sky * ao;
 
   col = aerial_A(col, camPos, wp, sd, Rg, sunCol);
-  return col;
+  return vec4<f32>(col, alpha);
 }
 ${atmosphere('A')}
 `);

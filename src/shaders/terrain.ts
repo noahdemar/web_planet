@@ -106,7 +106,7 @@ fn dirCOf_${s}(Pc: vec3<f32>, lenPc: f32) -> vec3<f32> { return Pc / lenPc; }
 fn morphed_${s}(gpos: vec2<f32>, gpar: vec3<f32>, A: f32, B: f32, hs: f32,
                 Pc: vec3<f32>, lenPc: f32, BU: vec3<f32>, BV: vec3<f32>,
                 anchorRel: vec3<f32>, radius: f32, refR: f32,
-                morph: vec2<f32>, stepG: f32) -> vec2<f32> {
+                morph: vec2<f32>, stepG: f32) -> vec3<f32> {
   let d0 = offset_${s}(gpos, A, B, hs, Pc, lenPc, BU, BV);
   // Distance must be measured on the same sphere the CPU selected against:
   // the camera's own ground radius, not sea level. Standing on 2.5 km of
@@ -115,7 +115,10 @@ fn morphed_${s}(gpos: vec2<f32>, gpar: vec3<f32>, A: f32, B: f32, hs: f32,
   // its parent's grid and adjacent levels no longer line up.
   let dist = length(anchorRel + dirCOf_${s}(Pc, lenPc) * (refR - radius) + d0 * refR);
   let mk = clamp((dist - morph.x) / max(morph.y - morph.x, 1e-6), 0.0, 1.0);
-  return gpos - gpar.xy * stepG * mk;
+  // The morph factor rides along: a fully morphed patch has its parent's
+  // vertex spacing, and the band limit must follow that or it would disagree
+  // with the coarser neighbour across a shared edge.
+  return vec3<f32>(gpos - gpar.xy * stepG * mk, mk);
 }
 `;
 }
@@ -207,7 +210,21 @@ fn sstepd_${s}(e0: f32, e1: f32, x: f32) -> vec2<f32> {
 // Elevation in metres, plus its gradient with respect to the unit direction.
 // M1 placeholder: continents + ridged relief. Replaced at M5/M6 by tile
 // sampling plus context-modulated amplification (SPEC.md §6).
-fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32, sea: f32, band: f32) -> vec4<f32> {
+/**
+ * Elevation and its gradient.
+ *
+ * bandLimit is radius / vertex-spacing. Octaves finer than the mesh can
+ * represent are faded out rather than evaluated: at LOD 10 the mesh samples
+ * every 281 m while octave 17 has a 19 m wavelength, so it was 29x
+ * undersampled and every vertex was landing on an essentially random phase of
+ * it. Morphing then slid vertices through that field and the surface boiled.
+ *
+ * The weights are *not* renormalised. Dropping an octave must lower-pass the
+ * surface, not rescale what is left, or the terrain would change shape as you
+ * approached it (SPEC.md I2).
+ */
+fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32, sea: f32, band: f32,
+               bandLimit: f32) -> vec4<f32> {
   var cAmp = 1.0; var cFrq = 1.15; var cSum = 0.0;
   var cG = vec3<f32>(0.0); var cNorm = 0.0;
   for (var i = 0; i < 4; i = i + 1) {
@@ -224,11 +241,16 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32, sea: f32, band: f32) -> ve
   var mAmp = 1.0; var mFrq = 2.9; var mSum = 0.0;
   var mG = vec3<f32>(0.0); var mNorm = 0.0;
   for (var i = 0; i < oct; i = i + 1) {
-    let n = noised_${s}(dir * mFrq + vec3<f32>(f32(i) * 7.77));
-    let sg = select(-1.0, 1.0, n.x >= 0.0);
-    let r = 1.0 - abs(n.x);
-    mSum  = mSum + mAmp * r * r;
-    mG    = mG - mAmp * 2.0 * r * sg * mFrq * n.yzw;
+    // Full weight while the wavelength spans 2.5 samples, zero by 1.
+    let w = smoothstep(1.0, 2.5, bandLimit / mFrq);
+    if (w > 0.002) {
+      let n = noised_${s}(dir * mFrq + vec3<f32>(f32(i) * 7.77));
+      let sg = select(-1.0, 1.0, n.x >= 0.0);
+      let r = 1.0 - abs(n.x);
+      mSum  = mSum + w * mAmp * r * r;
+      mG    = mG - w * mAmp * 2.0 * r * sg * mFrq * n.yzw;
+    }
+    // Unweighted: the normaliser must not change with the band limit.
     mNorm = mNorm + mAmp;
     mAmp = mAmp * ${RELIEF_GAIN};
     mFrq = mFrq * ${RELIEF_LACUNARITY};
@@ -269,7 +291,7 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32, sea: f32, band: f32) -> ve
  * function, so they cannot disagree, and instances can dissolve into the tint
  * without revealing an edge.
  */
-fn forestClump_${s}(dir: vec3<f32>) -> f32 {
+fn forestClump_${s}(dir: vec3<f32>, bandLimit: f32) -> f32 {
   // Three octaves at 7 km / 3 km / 1.3 km — glades, stand edges, dense pockets.
   // Without this the forest is a uniform mat, which reads as fake from the air
   // long before any individual tree does.
@@ -278,7 +300,10 @@ fn forestClump_${s}(dir: vec3<f32>) -> f32 {
   var sum = 0.0;
   var norm = 0.0;
   for (var i = 0; i < 3; i = i + 1) {
-    sum = sum + amp * noised_${s}(dir * frq + vec3<f32>(f32(i) * 11.37)).x;
+    let w = smoothstep(1.0, 2.5, bandLimit / frq);
+    if (w > 0.002) {
+      sum = sum + w * amp * noised_${s}(dir * frq + vec3<f32>(f32(i) * 11.37)).x;
+    }
     norm = norm + amp;
     amp = amp * 0.55;
     frq = frq * 2.3;
@@ -286,8 +311,9 @@ fn forestClump_${s}(dir: vec3<f32>) -> f32 {
   return smoothstep(-0.42, 0.26, sum / norm);
 }
 
-fn forestCover_${s}(dir: vec3<f32>, h: f32, slope: f32, density: f32) -> f32 {
-  let clump = forestClump_${s}(dir);
+fn forestCover_${s}(dir: vec3<f32>, h: f32, slope: f32, density: f32,
+                    bandLimit: f32) -> f32 {
+  let clump = forestClump_${s}(dir, bandLimit);
   let lo = smoothstep(${VEG_MIN_ELEVATION}.0, ${VEG_MIN_ELEVATION}.0 + 30.0, h);
   let hi = 1.0 - smoothstep(${VEG_TREELINE}.0 - 350.0, ${VEG_TREELINE}.0, h);
   let sl = 1.0 - smoothstep(0.30, ${VEG_MAX_SLOPE}, slope);
@@ -318,11 +344,19 @@ const UNPACK = `
 export const patchSurface = wgslFn(/* wgsl */ `
 fn patchSurface(${ARGS}) -> vec4<f32> {
   ${UNPACK}
-  let g = morphed_N(gpos, gpar, A, B, hs, Pc, lenPc, iBU, iBV,
+  let m = morphed_N(gpos, gpar, A, B, hs, Pc, lenPc, iBU, iBV,
                     anchorRel, radius, cfg2.z, iMorph, cfg.w);
+  let g = m.xy;
   let dd = offset_N(g, A, B, hs, Pc, lenPc, iBU, iBV);
   let dir = dirC + dd;
-  let hn = height_N(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y);
+
+  // Vertex spacing for this patch, widened by the morph: a fully morphed patch
+  // is drawing its parent's grid. cfg2.w is faceEdge/segments, so cfg2.w * hs
+  // is the unmorphed spacing.
+  let spacing = cfg2.w * hs * (1.0 + m.z);
+  let bandLimit = radius / max(spacing, 0.01);
+
+  let hn = height_N(dir, i32(cfg.z), cfg.y, cfg2.x, cfg2.y, bandLimit);
 
   // Surface normal from the tangential component of the height gradient.
   let gT = hn.yzw - dir * dot(dir, hn.yzw);
@@ -332,7 +366,7 @@ fn patchSurface(${ARGS}) -> vec4<f32> {
   // Cover is evaluated per vertex, not per pixel: three extra noise octaves
   // over ~700k vertices instead of ~3.7M pixels, and the field is smooth
   // enough at 1.3 km that interpolation costs nothing visible.
-  let cover = forestCover_N(dir, hn.x, slope, cfg3.x);
+  let cover = forestCover_N(dir, hn.x, slope, cfg3.x, bandLimit);
   return vec4<f32>(octEncode_N(nrm), hn.x, cover);
 }
 ${octPack('N')}
@@ -348,7 +382,7 @@ export const patchPosition = wgslFn(/* wgsl */ `
 fn patchPosition(${ARGS}, hgt: f32) -> vec3<f32> {
   ${UNPACK}
   let g = morphed_P(gpos, gpar, A, B, hs, Pc, lenPc, iBU, iBV,
-                    anchorRel, radius, cfg2.z, iMorph, cfg.w);
+                    anchorRel, radius, cfg2.z, iMorph, cfg.w).xy;
   let dd = offset_P(g, A, B, hs, Pc, lenPc, iBU, iBV);
 
   // Skirt depth scales with this patch's own vertex spacing, but the gap it
@@ -438,7 +472,10 @@ fn shadeTerrain(surf: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
   let scree = vec3<f32>(0.22, 0.20, 0.19);
   let snow  = vec3<f32>(0.72, 0.74, 0.78);
 
-  let hv = fract(sin(dot(up, vec3<f32>(91.7, 47.3, 63.1))) * 4371.13);
+  // Variation must come from something smooth. A per-pixel hash of the surface
+  // direction was chaotic in screen space and flickered whenever the camera
+  // moved — an aliasing source with no filterable band.
+  let hv = clamp(hgt / 2200.0, 0.0, 1.0) * 0.65 + slope * 0.7;
 
   if (hgt < 0.0) {
     // Water: a dielectric, so almost all of what you see is reflected sky and

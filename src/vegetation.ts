@@ -250,7 +250,11 @@ export class Vegetation {
         }),
       );
       mat.colorNode = asVec3(shaded.xyz);
+      mat.opacityNode = shaded.w;
+      // Alpha-to-coverage rather than a hard cutout: MSAA then resolves the
+      // crown outline, which is where most of the foliage crawl came from.
       mat.transparent = false;
+      mat.alphaToCoverage = true;
       mat.side = DoubleSide;
 
       const mesh = new Mesh(geo, mat);
