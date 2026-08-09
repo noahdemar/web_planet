@@ -101,6 +101,7 @@ export class PatchSelector {
   private horizonAngle = 0;
   private count = 0;
   private maxLevelCap = MAX_LEVEL;
+  private distanceCap = Infinity;
 
   constructor(lodFactor: number) {
     this.setLodFactor(lodFactor);
@@ -115,6 +116,15 @@ export class PatchSelector {
 
   setMaxLevel(l: number): void {
     this.maxLevelCap = Math.max(0, Math.min(MAX_LEVEL, l | 0));
+  }
+
+  /**
+   * Discard patches beyond this distance entirely. Used for the shadow pass,
+   * which needs terrain out to the largest cascade and nothing else — drawing
+   * the full horizon into a 61 m cascade was 75% of all geometry in the frame.
+   */
+  setDistanceCap(d: number): void {
+    this.distanceCap = d;
   }
 
   /**
@@ -250,6 +260,8 @@ export class PatchSelector {
     if (level === VEG_LEVEL && d <= VEG_TILE_RANGE) {
       this.emitVegTile(face, i, j, A, B, hs, dirC, lenPc);
     }
+
+    if (d > this.distanceCap) return;
 
     const subdivide = level < this.maxLevelCap && d <= this.ranges[level];
     if (subdivide) {

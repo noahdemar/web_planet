@@ -75,18 +75,33 @@ const CELLS_SQ = VEG_CELLS * VEG_CELLS;
 /** Indirect draw args are 5 u32: indexCount, instanceCount, firstIndex, baseVertex, firstInstance. */
 const ARGS = 5;
 
-/** A unit quad with its origin at the base, so instances sit on the ground. */
-function quadGeometry(): BufferGeometry {
+/**
+ * Instance geometry, origin at the base so plants sit on the ground.
+ *
+ * `planes` = 0 gives one camera-facing quad. Any higher count gives that many
+ * fixed-orientation quads crossed evenly about the vertical, which is what
+ * makes a close tree hold up: a single facing quad has no parallax against its
+ * neighbours and slides as the camera moves.
+ */
+function quadGeometry(planes = 0): BufferGeometry {
   const g = new BufferGeometry();
-  g.setAttribute(
-    'corner',
-    new BufferAttribute(new Float32Array([-0.5, 0, 0.5, 0, 0.5, 1, -0.5, 1]), 2),
-  );
-  g.setAttribute(
-    'quv',
-    new BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2),
-  );
-  g.setIndex(new BufferAttribute(new Uint32Array([0, 1, 2, 0, 2, 3]), 1));
+  const n = Math.max(1, planes);
+  const corner: number[] = [];
+  const quv: number[] = [];
+  const idx: number[] = [];
+
+  for (let p = 0; p < n; p++) {
+    // Negative marks the camera-facing case; the shader branches on the sign.
+    const angle = planes === 0 ? -1 : (p * Math.PI) / n;
+    const base = p * 4;
+    corner.push(-0.5, 0, 0.5, 0, 0.5, 1, -0.5, 1);
+    quv.push(0, 0, angle, 1, 0, angle, 1, 1, angle, 0, 1, angle);
+    idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+
+  g.setAttribute('corner', new BufferAttribute(new Float32Array(corner), 2));
+  g.setAttribute('quv', new BufferAttribute(new Float32Array(quv), 3));
+  g.setIndex(new BufferAttribute(new Uint32Array(idx), 1));
   return g;
 }
 
@@ -159,7 +174,7 @@ export class Vegetation {
     // Index count and the two zero fields never change; only instanceCount is
     // touched at runtime, by the GPU.
     for (let b = 0; b < BANDS; b++) {
-      (this.argsAttr.array as Uint32Array)[b * ARGS] = 6;
+      (this.argsAttr.array as Uint32Array)[b * ARGS] = b === 0 ? 18 : 6;
     }
 
     const tiles = storage(this.tileAttr, 'vec4', MAX_VEG_TILES * 5).toReadOnly();
@@ -231,23 +246,31 @@ export class Vegetation {
     // and draws with its own slice of the indirect args, so no band needs the
     // `indirect-first-instance` feature.
     for (let b = 0; b < BANDS; b++) {
-      const geo = quadGeometry();
+      // Only the near band earns crossed quads; beyond ~45 m the parallax is
+      // imperceptible and the extra fill is not.
+      const geo = quadGeometry(b === 0 ? 3 : 0);
       geo.indirect = this.argsAttr;
       geo.indirectOffset = b * ARGS * 4; // bytes
 
       const readInsts = storage(this.instAttr, 'vec4', VEG_CAPACITY).toReadOnly();
       const inst = asVec4(readInsts.element(uint(b * VEG_BAND_CAPACITY).add(instanceIndex)));
       const corner = attribute('corner', 'vec2');
-      const quv = attribute('quv', 'vec2');
+      const quv = attribute('quv', 'vec3');
 
       const mat = new MeshBasicNodeMaterial();
       mat.positionNode = asVec3(
-        billboard({ inst, corner, camPos: this.camPos, fadeCfg: this.fadeCfg }),
+        billboard({
+          inst,
+          corner,
+          camPos: this.camPos,
+          fadeCfg: this.fadeCfg,
+          plane: asVec3(quv).z,
+        }),
       );
       const shaded = asVec4(
         shadeVegetation({
           inst: varying(inst, `vInst${b}`),
-          uv: varying(quv, `vUv${b}`),
+          uv: asVec3(varying(quv, `vUv${b}`)).xy,
           camPos: this.camPos,
           sunDir: this.sun,
           sunCol: this.sunCol,
@@ -275,7 +298,9 @@ export class Vegetation {
       const mesh = new Mesh(geo, mat);
       mesh.frustumCulled = false;
       mesh.matrixAutoUpdate = false;
-      mesh.renderOrder = 1;
+      // Front to back, so early-Z kills the far band where near trees already
+      // cover the pixel. Overdraw, not triangles, is what this costs.
+      mesh.renderOrder = 1 + b;
       this.meshes.push(mesh);
     }
   }

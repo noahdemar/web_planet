@@ -100,7 +100,9 @@ export function makeShadowFactor(u: ShadowUniforms, shadows: Shadows) {
     const frag = n(rel.dot(n(u.sunDir)));
 
     const texel = n(radius.mul(2 / MAP_SIZE));
-    const bias = n(texel.mul(2.5).add(0.05));
+    // The shadow pass draws a coarser mesh than the one being shaded, so the
+    // bias has to cover that divergence as well as texel quantisation.
+    const bias = n(texel.mul(3.0).add(0.35));
 
     let sum = n(float(0));
     for (const [dx, dy] of TAPS) {

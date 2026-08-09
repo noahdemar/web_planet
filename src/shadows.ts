@@ -58,6 +58,12 @@ export interface ShadowCaster {
   mesh: Mesh;
   /** Same positionNode as the display material, trivial fragment shader. */
   depthMaterial: Material;
+  /**
+   * Skip this caster for cascades whose radius exceeds this. Distant foliage
+   * casting into the far cascade costs 200k instances per cascade and changes
+   * essentially nothing on screen.
+   */
+  maxCascadeRadius?: number;
 }
 
 export class Shadows {
@@ -176,9 +182,17 @@ export class Shadows {
     const wasVisible = hide.map((o) => o.visible);
     hide.forEach((o) => (o.visible = false));
     const displayMaterials = casters.map((c) => c.mesh.material);
+    const casterVisible = casters.map((c) => c.mesh.visible);
     casters.forEach((c) => (c.mesh.material = c.depthMaterial));
 
     for (let i = 0; i < CASCADES; i++) {
+      // Per-cascade caster selection, not per-frame: what is worth recording
+      // in a 61 m map is not what is worth recording in a 1.4 km one.
+      casters.forEach((c, k) => {
+        const limit = c.maxCascadeRadius ?? Infinity;
+        c.mesh.visible = casterVisible[k] && this.radii[i] <= limit;
+      });
+
       renderer.setRenderTarget(this.targets[i]);
       renderer.setClearColor(0xffffff, 1); // "nothing here" = maximally far
       renderer.clear();
@@ -186,7 +200,10 @@ export class Shadows {
     }
 
     renderer.setRenderTarget(null);
-    casters.forEach((c, k) => (c.mesh.material = displayMaterials[k]));
+    casters.forEach((c, k) => {
+      c.mesh.material = displayMaterials[k];
+      c.mesh.visible = casterVisible[k];
+    });
     hide.forEach((o, k) => (o.visible = wasVisible[k]));
   }
 }

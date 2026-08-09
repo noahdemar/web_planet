@@ -44,6 +44,7 @@ export interface HudState {
   groundFollow: boolean;
   stats: SelectStats;
   veg: VegStats;
+  gpu: { render: number; compute: number; drawCalls: number; triangles: number };
 }
 
 const MODES = ['natural', 'LOD level', 'slope', 'normals', 'canopy cover', 'albedo'];
@@ -73,6 +74,9 @@ export class Hud {
       <h1>world_sim · M1</h1>
       ${row('frame', `<span class="${budget}">${s.frameMs.toFixed(2)} ms · ${s.fps.toFixed(0)} fps</span>`)}
       ${row('worst (2s)', `${s.worstMs.toFixed(2)} ms`)}
+      ${row('gpu render', `${s.gpu.render.toFixed(2)} ms`)}
+      ${row('gpu compute', `${s.gpu.compute.toFixed(2)} ms`)}
+      ${row('draws / tris', `${s.gpu.drawCalls} · ${fmtCount(s.gpu.triangles)}`)}
       <div class="sep"></div>
       ${row('altitude', metres(s.altitude))}
       ${row('speed', `${speed(s.speed)} <span style="opacity:.5">×${s.speedMul.toFixed(2)}</span>`)}

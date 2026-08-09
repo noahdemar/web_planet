@@ -70,10 +70,18 @@ the GPU; the indirect draws read their instance count from the buffer the
 compute pass wrote, and nothing is ever read back. Cost is O(candidate cells),
 independent of how many instances survive.
 
-| density | candidates | instances | frame @1440p |
-|---|---:|---:|---:|
-| 0.42 (default) | 377 k | 90.5 k | 4.6 ms · 216 fps |
-| 1.0 | 377 k | **214.9 k** | 11.7 ms · 86 fps |
+Cost breakdown at 55 m altitude, 1440p, measured by toggling each system:
+
+| | frame | triangles |
+|---|---:|---:|
+| terrain only | 5.6 ms | 1.83 M |
+| + shadows | 9.5 ms | 5.00 M |
+| + vegetation | 14.3 ms | 5.00 M + fill |
+| **after the fixes below** | **4.9 ms** | **2.89 M** |
+
+The shadow pass was 75% of all geometry — the full horizon selection was being
+drawn into a cascade covering 61 m — and it is vertex-bound, because every
+shadow vertex pays the same 17-octave terrain shader as a display vertex.
 
 215 k instances is above SPEC §8's target of ~1.9 × 10⁵ canopy trees within a
 1 km radius, so the browser is not the constraint here. Band split at full

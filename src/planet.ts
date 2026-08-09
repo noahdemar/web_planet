@@ -129,8 +129,13 @@ export const VEG_CELLS = 128;
  */
 export const MAX_VEG_TILES = 32;
 
-/** Distance beyond which canopy becomes a terrain material, not objects. */
-export const VEG_RANGE = 1100;
+/**
+ * Distance beyond which canopy becomes a terrain material, not objects.
+ * Instance count grows with the square of this, and the far band is almost
+ * entirely occluded by nearer trees at ground level, so it is bought at a poor
+ * rate — the terrain tint already carries the forest past here.
+ */
+export const VEG_RANGE = 850;
 
 /**
  * Representation bands. LOD here changes what an instance *is*, not how many

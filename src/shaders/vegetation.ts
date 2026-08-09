@@ -119,7 +119,7 @@ ${field('V')}
  */
 export const billboard = wgslFn(/* wgsl */ `
 fn billboard(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>,
-             fadeCfg: vec4<f32>) -> vec3<f32> {
+             fadeCfg: vec4<f32>, plane: f32) -> vec3<f32> {
   let base = inst.xyz;
   let d = length(base);
 
@@ -133,12 +133,29 @@ fn billboard(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>,
   let scale = inst.w * min(sizeFade, rangeFade);
 
   let up = normalize(camPos + base);
-  var right = cross(up, base);
-  let l = length(right);
-  // Degenerate only when looking straight down the instance's own axis, where
-  // the quad is edge-on and invisible anyway.
-  right = select(vec3<f32>(1.0, 0.0, 0.0), right / max(l, 1e-6), l > 1e-6);
-  return base + right * (corner.x * scale * 0.6) + up * (corner.y * scale);
+
+  var right: vec3<f32>;
+  if (plane < 0.0) {
+    // Camera-facing: one quad, cylindrical so trees stay upright on pitch.
+    var r = cross(up, base);
+    let l = length(r);
+    right = select(vec3<f32>(1.0, 0.0, 0.0), r / max(l, 1e-6), l > 1e-6);
+  } else {
+    // Fixed-orientation crossed quads. A single facing quad has no parallax,
+    // so a close tree slides against its neighbours and reads as a cut-out;
+    // three fixed planes give real depth for the cost of four more triangles.
+    // Not named 'ref' — that is a reserved keyword in WGSL.
+    var axis = vec3<f32>(0.0, 1.0, 0.0);
+    if (abs(up.y) > 0.99) { axis = vec3<f32>(0.0, 0.0, 1.0); }
+    let east = normalize(cross(axis, up));
+    let north = cross(up, east);
+    // Per-instance yaw, so stands do not line up into rows.
+    let spin = fract(inst.x * 0.017 + inst.z * 0.031) * 6.2831853;
+    let a = plane + spin;
+    right = east * cos(a) + north * sin(a);
+  }
+
+  return base + right * (corner.x * scale * 0.62) + up * (corner.y * scale);
 }
 `);
 
@@ -153,18 +170,35 @@ export const shadeVegetation = wgslFn(/* wgsl */ `
 fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
                    sunDir: vec3<f32>, sunCol: vec3<f32>,
                    band: f32, mode: f32, cfg: vec4<f32>, shadow: f32) -> vec4<f32> {
-  // Soft crown mask so the quad does not read as a rectangle, with a hashed
-  // aspect so neighbouring crowns are not identical silhouettes.
+  // Two crown profiles rather than one ellipse for everything. A forest of
+  // identical blobs reads as procedural at a glance; a conifer/broadleaf mix
+  // with varied proportions is the cheapest way out of that.
   let v = fract(inst.x * 0.013 + inst.z * 0.029 + inst.w * 0.17);
+  let conifer = step(0.45, fract(inst.z * 0.041 + inst.x * 0.007));
+  let x = abs(uv.x - 0.5) * 2.0;
+
+  // Conifer: a tapered spire, widest low, with a ragged edge.
+  let taper = 1.0 - smoothstep(0.12, 1.0, uv.y);
+  let ragged = 0.86 + 0.14 * sin(uv.y * 34.0 + v * 20.0);
+  let spire = 1.0 - smoothstep(taper * ragged * 0.92, taper * ragged, x);
+
+  // Broadleaf: a rounded mass sitting above a clear bole.
   let wob = 0.85 + 0.4 * v;
-  let d = vec2<f32>((uv.x - 0.5) * 2.05, (uv.y - 0.58) * (2.15 * wob));
-  let crown = 1.0 - smoothstep(0.5, 1.0, dot(d, d));
-  let trunk = (1.0 - smoothstep(0.030, 0.062, abs(uv.x - 0.5))) *
-              (1.0 - smoothstep(0.26, 0.40, uv.y));
-  // Analytic edge width, so the crown outline resolves against MSAA coverage
-  // instead of stair-stepping and crawling.
+  let d = vec2<f32>(x, (uv.y - 0.62) * (2.3 * wob));
+  let round = 1.0 - smoothstep(0.62, 1.0, dot(d, d));
+
+  let crown = mix(round, spire, conifer);
+  // Conifers carry foliage lower, so their bole is shorter.
+  let boleTop = mix(0.34, 0.16, conifer);
+  let trunk = (1.0 - smoothstep(0.028, 0.058, abs(uv.x - 0.5))) *
+              (1.0 - smoothstep(boleTop - 0.1, boleTop, uv.y));
+  // Analytic edge so the crown outline resolves against MSAA coverage instead
+  // of stair-stepping. The width is *capped*: on a crown only a few pixels
+  // across, fwidth spans the whole blob, every pixel lands mid-ramp, and
+  // alpha-to-coverage turns the entire tree into dither noise. Clamping keeps
+  // the edge a genuine edge and the interior solid.
   let raw = max(crown, trunk);
-  let aa = max(fwidth(raw), 1e-4);
+  let aa = clamp(fwidth(raw), 1e-4, 0.30);
   let alpha = clamp((raw - 0.42) / aa + 0.5, 0.0, 1.0);
   if (alpha < 0.02) { discard; }
 

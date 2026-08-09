@@ -18,10 +18,18 @@ import { normalize } from './math/vec3d.js';
 import { auditCracks } from './devAudit.js';
 import { Vegetation } from './vegetation.js';
 import { Sky } from './sky.js';
-import { Shadows } from './shadows.js';
+import { CASCADES, Shadows } from './shadows.js';
 import { createShadowUniforms, makeShadowFactor } from './shaders/shadowSample.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
+
+/**
+ * LOD factor for the shadow pass. Much coarser than the display value: the
+ * cost is per vertex, and a shadow map cannot resolve detail finer than its
+ * own texel. Too low and the caster surface diverges from the receiver's,
+ * which shows up as false self-shadowing.
+ */
+const SHADOW_LOD_FACTOR = 1.1;
 
 function fatal(err: unknown): void {
   const box = document.getElementById('err')!;
@@ -44,6 +52,9 @@ async function main(): Promise<void> {
 
   const renderer = new WebGPURenderer({
     antialias: true,
+    // Real GPU time per pass. CPU-side timing measures queue submission, not
+    // work, and every performance decision here has been guesswork without it.
+    trackTimestamp: true,
     // The orbit-to-ground depth range is ~7 orders of magnitude; a linear
     // depth buffer cannot hold it (SPEC.md §7).
     logarithmicDepthBuffer: true,
@@ -79,9 +90,12 @@ async function main(): Promise<void> {
 
   const shadowCasters = [
     { mesh: terrain.mesh, depthMaterial: terrain.depthMaterial },
-    ...vegetation.meshes.map((m, i) => ({
+    // Only the near two bands cast. The far band is ~95% of all instances and
+    // its shadows land where aerial perspective has already taken over.
+    ...vegetation.meshes.slice(0, 2).map((m, i) => ({
       mesh: m,
       depthMaterial: vegetation.depthMaterials[i],
+      maxCascadeRadius: i === 0 ? 400 : 2000,
     })),
   ];
   let shadowsOn = true;
@@ -232,14 +246,49 @@ async function main(): Promise<void> {
         alt,
         new Vector3(controls.up[0], controls.up[1], controls.up[2]),
       );
-      shadows.render(renderer, scene, shadowCasters, [sky.mesh]);
-      renderer.setClearColor(0x000000, 1);
+
+      if (shadows.strength > 0) {
+        // Re-select terrain for the shadow pass, capped at the largest cascade.
+        // The display selection reaches the horizon — tens of kilometres — and
+        // none of that belongs in a shadow map.
+        // Every shadow vertex pays the full 17-octave terrain shader, so the
+        // shadow pass is vertex-bound and patch count is the lever. A coarser
+        // LOD is nearly free visually: cascade 2's texel is 1.4 m, so geometry
+        // finer than that cannot be recorded anyway.
+        selector.setDistanceCap(shadows.radii[CASCADES - 1] * 1.5);
+        selector.setLodFactor(SHADOW_LOD_FACTOR);
+        selector.setMaxLevel(17);
+        const shadowStats = selector.select(
+          controls.pos,
+          controls.groundRadius,
+          camera.matrixWorldInverse,
+          camera.projectionMatrix,
+        );
+        terrain.update(shadowStats.patches);
+        shadows.render(renderer, scene, shadowCasters, [sky.mesh]);
+        renderer.setClearColor(0x000000, 1);
+
+        // Restore the display selection.
+        selector.setDistanceCap(Infinity);
+        selector.setLodFactor(lodFactor);
+        selector.setMaxLevel(maxLevel);
+        selector.select(
+          controls.pos,
+          controls.groundRadius,
+          camera.matrixWorldInverse,
+          camera.projectionMatrix,
+        );
+        terrain.update(stats.patches);
+      }
     } else {
       shadows.strength = 0;
     }
     shadowU.sync(shadows, sun);
 
     renderer.render(scene, camera);
+
+    // Timestamps resolve a frame or two late; that is fine for a readout.
+    void renderer.resolveTimestampsAsync().catch(() => {});
 
     const frameMs = performance.now() - now;
     smoothed += (frameMs - smoothed) * 0.1;
@@ -264,6 +313,12 @@ async function main(): Promise<void> {
         groundFollow: controls.groundFollow,
         stats,
         veg: vegetation.stats,
+        gpu: {
+          render: renderer.info.render.timestamp,
+          compute: renderer.info.compute.timestamp,
+          drawCalls: renderer.info.render.drawCalls,
+          triangles: renderer.info.render.triangles,
+        },
       },
       now,
     );
