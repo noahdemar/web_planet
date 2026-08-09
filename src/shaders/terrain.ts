@@ -417,7 +417,7 @@ ${geom('P')}
 export const shadeTerrain = wgslFn(/* wgsl */ `
 fn shadeTerrain(surf: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
                 lvl: f32, sunDir: vec3<f32>, sunCol: vec3<f32>,
-                mode: f32, grid: f32, cfg3: vec4<f32>) -> vec3<f32> {
+                mode: f32, grid: f32, cfg3: vec4<f32>, shadow: f32) -> vec3<f32> {
   let n = octDecode_T(surf.xy);
   let hgt = surf.z;
   let cover = surf.w;
@@ -486,7 +486,7 @@ fn shadeTerrain(surf: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
     let f0 = 0.02;
     let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(v, up), 0.0, 1.0), 5.0);
     let hvec = normalize(v + sd);
-    let spec = pow(max(dot(up, hvec), 0.0), 900.0) * 2.4;
+    let spec = pow(max(dot(up, hvec), 0.0), 900.0) * 2.4 * shadow;
     let sunTrW = transmit_T(sunDepth_T(wp, sd, Rg));
     let skyW = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.05 + 0.6 * max(dot(up, sd), 0.0));
     var wc = body * skyW * 3.0
@@ -524,13 +524,21 @@ fn shadeTerrain(surf: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
   // Soft terminator: unresolved relief keeps scattering light just past the
   // geometric horizon, and a hard cut there reads as a CG edge.
   let soft = smoothstep(-0.10, 0.12, dot(n, sd));
-  let direct = alb * (1.0 / 3.14159265) * sunCol * sunTr * ndl * soft;
+  // Shadow attenuates only the direct term. Sky light still reaches a
+  // shadowed surface, which is why real shadows are blue rather than black.
+  let direct = alb * (1.0 / 3.14159265) * sunCol * sunTr * ndl * soft * shadow;
 
   let sunUp = max(dot(up, sd), 0.0);
   let sky = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.045 + 0.6 * sunUp);
   let ambient = alb * sky * (0.5 + 0.5 * dot(n, up));
 
-  var col = direct + ambient;
+  // One crude bounce off the surrounding lit ground, deliberately *not*
+  // shadowed. Without it a cast shadow goes almost black, which is the single
+  // clearest tell that a renderer has direct light and nothing else — real
+  // shadows are filled by everything around them.
+  let bounce = alb * alb * sunCol * sunTr * sunUp * 0.55;
+
+  var col = direct + ambient + bounce;
   col = aerial_T(col, camPos, wp, sd, Rg, sunCol);
   return mix(col, gridCol * 0.5, overlay * 0.85);
 }

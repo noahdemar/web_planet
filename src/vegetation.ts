@@ -34,6 +34,7 @@ import {
   atomicAdd,
   atomicStore,
   compute,
+  dot as tslDot,
   float,
   instanceIndex,
   select,
@@ -66,6 +67,9 @@ type Vec4Node = ReturnType<typeof vec3>['xyzz'];
 const asVec3 = (n: unknown): Vec3Node => n as Vec3Node;
 const asVec4 = (n: unknown): Vec4Node => n as Vec4Node;
 
+/** Returns a scalar node in [0,1]: the fraction of sun reaching a point. */
+export type ShadowFactor = (rel: unknown) => ReturnType<typeof float>;
+
 const BANDS = VEG_BANDS.length;
 const CELLS_SQ = VEG_CELLS * VEG_CELLS;
 /** Indirect draw args are 5 u32: indexCount, instanceCount, firstIndex, baseVertex, firstInstance. */
@@ -96,6 +100,8 @@ export interface VegStats {
 
 export class Vegetation {
   readonly meshes: Mesh[] = [];
+  /** One per band; same vertex path as the display material. */
+  readonly depthMaterials: MeshBasicNodeMaterial[] = [];
   readonly stats: VegStats = {
     tiles: 0,
     perBand: new Array(BANDS).fill(0),
@@ -142,13 +148,14 @@ export class Vegetation {
   private sunCol = uniform(new Vector3(1, 0.97, 0.92));
   private camPos = uniform(new Vector3());
   private sun = uniform(new Vector3(0.62, 0.28, 0.73).normalize());
+  private shadowSun = uniform(new Vector3(0, 1, 0));
   private mode = uniform(0);
 
   private resetPass: ComputeNode;
   private scatterPass: ComputeNode;
   private enabled = true;
 
-  constructor() {
+  constructor(shadowFactor?: ShadowFactor) {
     // Index count and the two zero fields never change; only instanceCount is
     // touched at runtime, by the GPU.
     for (let b = 0; b < BANDS; b++) {
@@ -247,6 +254,7 @@ export class Vegetation {
           band: float(b),
           mode: this.mode,
           cfg: this.cfg,
+          shadow: shadowFactor ? shadowFactor(inst.xyz) : float(1),
         }),
       );
       mat.colorNode = asVec3(shaded.xyz);
@@ -256,6 +264,13 @@ export class Vegetation {
       mat.transparent = false;
       mat.alphaToCoverage = true;
       mat.side = DoubleSide;
+
+      // Depth pass: same billboard, distance along the light as the payload.
+      const depthMat = new MeshBasicNodeMaterial();
+      depthMat.positionNode = mat.positionNode;
+      depthMat.colorNode = asVec3(vec3(tslDot(inst.xyz, this.shadowSun)));
+      depthMat.side = DoubleSide;
+      this.depthMaterials.push(depthMat);
 
       const mesh = new Mesh(geo, mat);
       mesh.frustumCulled = false;
@@ -296,6 +311,7 @@ export class Vegetation {
 
   setSun(d: Vector3, colour?: Vector3): void {
     this.sun.value.copy(d).normalize();
+    this.shadowSun.value.copy(this.sun.value);
     if (colour) this.sunCol.value.copy(colour);
   }
 

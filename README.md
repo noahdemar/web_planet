@@ -31,7 +31,7 @@ bake pipeline at M3 requires compute shaders.
 | `V` / `B` | vegetation on·off / band debug colours |
 | `;` `'` | vegetation density · `N` read instance counts |
 | `O` / `P` | sun elevation / azimuth (hold Shift to reverse) |
-| `I` | invert vertical look |
+| `H` | shadows on·off · `I` invert vertical look |
 | `1`–`6` | shading: natural, LOD, slope, normals, cover, albedo |
 | `G` | metric grid: off → 100 m → 10 m → 1 m → 10 cm |
 | `[` `]` | LOD factor · `,` `.` octaves · `-` `=` max level |
@@ -94,6 +94,17 @@ behind progressively more air, which is why those transitions are invisible in
 a photograph and obvious without it. Shading is now roughly physical —
 reflectances lit by sun irradiance, through an ACES curve.
 
+**Cascaded shadows.** Three cascades, camera-relative, sized from altitude and
+faded out above 14 km where they stop contributing. The camera-relative
+architecture makes this unusually simple: every mesh already emits positions
+relative to the camera, so a light camera in that same space needs no world
+transform, and shadow matrices never hit the precision loss that normally
+forces cascade re-centring hacks. Depth is linear distance along the light in
+an R32F target rather than a hardware depth texture, so the test is a plain
+comparison. Terrain and foliage share one pass; each caster keeps its own
+vertex node graph, so the surface in the shadow map is exactly the surface
+drawn. Costs ~5 ms at ground level, nothing from orbit.
+
 **Measured realism, not eyeballed.** `npm run hypsometry` compares the
 elevation distribution against Earth's and can solve for better parameters
 (`-- --solve`). Land fraction 29.2% vs Earth's 29.2%; land median 850 m vs
@@ -132,9 +143,14 @@ inter-crown shadowing while the tinted ground is smooth. Closing that needs the
 canopy normal and height baked into the terrain virtual texture (SPEC §8), not
 more tuning.
 
-**No clouds, no water surface detail, no shadows.** The reference images imply
-all three. Clouds and shadow cascades are M9; water is currently a Fresnel
-term over a flat sphere, with no waves and no shoreline.
+**No clouds, and water is a flat sphere.** Both are visible gaps against the
+reference images. Water is a Fresnel term with no waves, no shoreline and no
+depth variation; clouds do not exist, and the Blue Marble is roughly half
+cloud.
+
+**Shadow quality is basic.** 3×3 PCF, no contact hardening, no filtering that
+adapts to cascade. Good enough that relief and canopy read correctly; not good
+enough to look at closely.
 
 **Vegetation is billboard quads, not plants.** The point of this stage was the
 substrate, not the art: one camera-facing quad per instance with a procedural

@@ -18,6 +18,8 @@ import { normalize } from './math/vec3d.js';
 import { auditCracks } from './devAudit.js';
 import { Vegetation } from './vegetation.js';
 import { Sky } from './sky.js';
+import { Shadows } from './shadows.js';
+import { createShadowUniforms, makeShadowFactor } from './shaders/shadowSample.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
 
@@ -60,15 +62,29 @@ async function main(): Promise<void> {
   const scene = new Scene();
   const camera = new PerspectiveCamera(62, innerWidth / innerHeight, 1, 1e7);
 
+  const shadows = new Shadows();
+  const shadowU = createShadowUniforms();
+  const shadowFactor = makeShadowFactor(shadowU, shadows);
+  const shadowOf = (rel: unknown) => shadowFactor(rel as never) as never;
+
   const selector = new PatchSelector(DEFAULT_LOD_FACTOR);
-  const terrain = new TerrainMesh(selector.buffers);
+  const terrain = new TerrainMesh(selector.buffers, shadowOf);
   scene.add(terrain.mesh);
 
   const sky = new Sky();
   scene.add(sky.mesh);
 
-  const vegetation = new Vegetation();
+  const vegetation = new Vegetation(shadowOf);
   for (const m of vegetation.meshes) scene.add(m);
+
+  const shadowCasters = [
+    { mesh: terrain.mesh, depthMaterial: terrain.depthMaterial },
+    ...vegetation.meshes.map((m, i) => ({
+      mesh: m,
+      depthMaterial: vegetation.depthMaterials[i],
+    })),
+  ];
+  let shadowsOn = true;
 
   const controls = new FlyControls(renderer.domElement);
   const hud = new Hud(document.getElementById('hud')!);
@@ -132,6 +148,9 @@ async function main(): Promise<void> {
       case 'KeyP':
         sunAz = (sunAz + (e.shiftKey ? -12 : 12)) % 360;
         aimSun(sunEl, sunAz);
+        break;
+      case 'KeyH':
+        shadowsOn = !shadowsOn;
         break;
       case 'KeyI':
         controls.invertY = !controls.invertY;
@@ -203,6 +222,22 @@ async function main(): Promise<void> {
     vegetation.setCamera(controls.pos[0], controls.pos[1], controls.pos[2]);
     vegetation.setOctaves(terrain.octaves);
     vegetation.update(renderer, selector.vegTileData, stats.vegTiles);
+
+    // Shadow pass before the main render: cascades are placed from this
+    // frame's camera, and the sky is excluded because it would fill every map.
+    if (shadowsOn) {
+      shadows.update(
+        new Vector3(controls.forward[0], controls.forward[1], controls.forward[2]),
+        sun,
+        alt,
+        new Vector3(controls.up[0], controls.up[1], controls.up[2]),
+      );
+      shadows.render(renderer, scene, shadowCasters, [sky.mesh]);
+      renderer.setClearColor(0x000000, 1);
+    } else {
+      shadows.strength = 0;
+    }
+    shadowU.sync(shadows, sun);
 
     renderer.render(scene, camera);
 
@@ -283,6 +318,7 @@ async function main(): Promise<void> {
       selector,
       vegetation,
       sky,
+      shadows,
       aimSun,
       // Both vegetation and the sky are hidden for the audit. Crowns
       // silhouetted against the sky would read as enclosed background, and the

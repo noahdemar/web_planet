@@ -18,7 +18,7 @@ import {
   Vector4,
 } from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
-import { attribute, uniform, varying, vec3, vec4 } from 'three/tsl';
+import { attribute, dot as tslDot, float, uniform, varying, vec3, vec4 } from 'three/tsl';
 import {
   DEFAULT_OCTAVES,
   MAX_PATCHES,
@@ -34,6 +34,9 @@ import type { PatchBuffers } from './quadtree.js';
 import { patchPosition, patchSurface, shadeTerrain } from './shaders/terrain.js';
 
 export type ShadeMode = 0 | 1 | 2 | 3 | 4 | 5;
+
+/** Returns a scalar node in [0,1]: the fraction of sun reaching a point. */
+export type ShadowFactor = (rel: unknown) => ReturnType<typeof float>;
 
 // wgslFn is declared as returning an untyped Node, and TSL only attaches
 // swizzle/assignment types to nodes with a known type. These recover the
@@ -112,6 +115,12 @@ function buildGrid(): InstancedBufferGeometry {
 
 export class TerrainMesh {
   readonly mesh: Mesh;
+  /**
+   * Same vertex position the display material uses, with a trivial fragment
+   * shader. The shadow pass must reproduce the surface exactly — reusing the
+   * node is the only way to guarantee that as the terrain evolves.
+   */
+  readonly depthMaterial: MeshBasicNodeMaterial;
   readonly geometry: InstancedBufferGeometry;
   readonly material: MeshBasicNodeMaterial;
 
@@ -128,10 +137,12 @@ export class TerrainMesh {
   private sunCol = uniform(new Vector3(1, 0.97, 0.92));
   /** Camera world position in f32 — shading only, never geometry (SPEC.md I4). */
   private camPos = uniform(new Vector3());
+  /** Light direction for the depth pass; kept in step with `sun`. */
+  private shadowSun = uniform(new Vector3(0, 1, 0));
   private mode = uniform(0);
   private gridSpacing = uniform(0);
 
-  constructor(buffers: PatchBuffers) {
+  constructor(buffers: PatchBuffers, shadowFactor?: ShadowFactor) {
     this.geometry = buildGrid();
 
     const inst = (name: string, arr: Float32Array, size: number) => {
@@ -189,9 +200,16 @@ export class TerrainMesh {
         mode: this.mode,
         grid: this.gridSpacing,
         cfg3: this.cfg3,
+        shadow: shadowFactor ? shadowFactor(relPos) : float(1),
       }),
     );
     this.material = material;
+
+    // Linear distance along the light, written to an R32F target.
+    const depthMat = new MeshBasicNodeMaterial();
+    depthMat.positionNode = position;
+    depthMat.colorNode = asVec3(vec3(tslDot(relPos, this.shadowSun)));
+    this.depthMaterial = depthMat;
 
     this.mesh = new Mesh(this.geometry, material);
     // Culling is ours (SPEC.md §3); three must not second-guess it, and the
@@ -254,6 +272,7 @@ export class TerrainMesh {
 
   setSun(d: Vector3, colour?: Vector3): void {
     this.sun.value.copy(d).normalize();
+    this.shadowSun.value.copy(this.sun.value);
     if (colour) this.sunCol.value.copy(colour);
   }
 

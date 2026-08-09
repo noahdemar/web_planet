@@ -152,7 +152,7 @@ fn billboard(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>,
 export const shadeVegetation = wgslFn(/* wgsl */ `
 fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
                    sunDir: vec3<f32>, sunCol: vec3<f32>,
-                   band: f32, mode: f32, cfg: vec4<f32>) -> vec4<f32> {
+                   band: f32, mode: f32, cfg: vec4<f32>, shadow: f32) -> vec4<f32> {
   // Soft crown mask so the quad does not read as a rectangle, with a hashed
   // aspect so neighbouring crowns are not identical silhouettes.
   let v = fract(inst.x * 0.013 + inst.z * 0.029 + inst.w * 0.17);
@@ -202,9 +202,12 @@ fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
   // foliage pi times brighter than the ground it stands on, which is exactly
   // the tonal step that gives a vegetation boundary away.
   let direct = alb * (1.0 / 3.14159265) * sunCol * sunTr
-             * (sunUp * 1.7 + through) * ao * form;
+             * (sunUp * 1.7 + through) * ao * form * shadow;
   let sky = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.045 + 0.6 * sunUp);
-  var col = direct + alb * sky * ao;
+  // Same unshadowed bounce as the terrain, so a shadowed crown sits in the
+  // same tonal range as shadowed ground rather than reading as a hole.
+  let bounce = alb * alb * sunCol * sunTr * sunUp * 0.55 * ao;
+  var col = direct + alb * sky * ao + bounce;
 
   col = aerial_A(col, camPos, wp, sd, Rg, sunCol);
   return vec4<f32>(col, alpha);
