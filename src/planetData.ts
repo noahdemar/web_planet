@@ -124,7 +124,8 @@ function faceCoords(x: number, y: number, z: number): [number, number, number] {
 }
 
 /**
- * Bilinear sample of the baked surface. Returns (elevation m, wetness).
+ * Bilinear sample of the baked surface. Returns (elevation m, wetness,
+ * standing-water depth m).
  *
  * Reads the same padded atlas the GPU does, with the same bilinear weights, so
  * the two agree to the precision of the arithmetic — including across face
@@ -135,7 +136,7 @@ export function sampleSurface(
   x: number,
   y: number,
   z: number,
-): { elevation: number; wetness: number } {
+): { elevation: number; wetness: number; lakeDepth: number; channelDist: number } {
   const [face, u, v] = faceCoords(x, y, z);
   const n = s.size;
   const cell = n + 2 * ATLAS_PAD;
@@ -161,5 +162,5 @@ export function sampleSurface(
     at(i0, j0 + 1, c) * (1 - tx) * ty +
     at(i0 + 1, j0 + 1, c) * tx * ty;
 
-  return { elevation: lerp2(0), wetness: lerp2(1) };
+  return { elevation: lerp2(0), wetness: lerp2(1), lakeDepth: lerp2(2), channelDist: lerp2(3) };
 }

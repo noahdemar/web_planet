@@ -105,6 +105,14 @@ export interface Flow {
 /** Cardinal neighbour slots in the grid's D8 ordering: S, W, E, N. */
 const CARDINAL = [1, 3, 4, 6];
 
+/**
+ * How much the depression filler must raise a cell before it counts as a lake,
+ * metres. The filler's own ε is 1 mm per cell, so this only has to be well
+ * clear of that; 4 m is also about the shallowest standing water worth drawing
+ * at a 9 km cell.
+ */
+const LAKE_MIN_DEPTH = 4;
+
 /** Per-cell surface area, from the local neighbour spacing. */
 export function cellAreas(grid: Grid): Float64Array {
   const a = new Float64Array(grid.count);
@@ -260,6 +268,96 @@ export function routeFlow(
   }
 
   return { receiver, length, stack, area };
+}
+
+/**
+ * Upstream drainage area by multiple flow direction (Freeman 1991).
+ *
+ * The erosion wants D8: stream power is a channel process, the Braun–Willett
+ * O(n) solve needs a receiver *tree*, and the elevation it produces measures
+ * out at only 6% grid-anisotropic, so single-flow is doing no visible harm
+ * there. The rendered *wetness* is a different question. D8 gives every cell
+ * exactly one of eight directions, so a trunk river drawn from it is a
+ * polyline of 0°, 45° and 90° segments — a staircase, and at 573 km altitude
+ * that is precisely what it looked like.
+ *
+ * MFD splits each cell's accumulation across every downslope neighbour in
+ * proportion to slope^p. The direction quantisation disappears because flow is
+ * no longer a choice between eight options; it is a weighted average of them,
+ * and the average moves continuously as the surface tilts. It also spreads the
+ * corridor across the valley floor rather than concentrating it in one cell,
+ * which is both what a riparian zone actually looks like and what stops the
+ * field from being a one-texel line that no amount of filtering can make look
+ * like anything but a one-texel line.
+ *
+ * p = 1.1 is Freeman's fitted value: p → ∞ recovers D8, p → 0 spreads flow
+ * evenly downhill and dissolves the network entirely.
+ *
+ * Ordering is by descending elevation over the whole grid, which is what makes
+ * one pass sufficient — a cell's total is final before any of its receivers is
+ * visited. The D8 stack cannot serve here: it orders the receiver *tree*, and
+ * MFD sends flow along links that tree does not contain.
+ */
+export function accumulateMFD(
+  grid: Grid,
+  z: Float32Array,
+  area0: Float64Array,
+  seaLevel = 0,
+): Float64Array {
+  const { count } = grid;
+  const acc = new Float64Array(count);
+  for (let c = 0; c < count; c++) acc[c] = area0[c];
+
+  // Descending elevation. A comparison sort of 6.3M indices is a few seconds;
+  // a bucket sort on a 16-bit key is a few tens of milliseconds, and one metre
+  // of key resolution is far finer than any slope this matters for.
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (let c = 0; c < count; c++) {
+    if (z[c] < lo) lo = z[c];
+    if (z[c] > hi) hi = z[c];
+  }
+  const BUCKETS = 1 << 16;
+  const scale = (BUCKETS - 1) / Math.max(hi - lo, 1e-6);
+  const hist = new Int32Array(BUCKETS + 1);
+  const key = new Int32Array(count);
+  for (let c = 0; c < count; c++) {
+    // Descending: bucket 0 is the highest ground.
+    const k = BUCKETS - 1 - Math.min(BUCKETS - 1, Math.max(0, Math.round((z[c] - lo) * scale)));
+    key[c] = k;
+    hist[k + 1]++;
+  }
+  for (let b = 0; b < BUCKETS; b++) hist[b + 1] += hist[b];
+  const order = new Int32Array(count);
+  const cursor = hist.slice();
+  for (let c = 0; c < count; c++) order[cursor[key[c]]++] = c;
+
+  const P = 1.1;
+  const w = new Float64Array(8);
+  for (let i = 0; i < count; i++) {
+    const c = order[i];
+    // The sea absorbs; it does not route. Without this, coastal cells push
+    // their area along the shore and the ocean lights up as one huge basin.
+    if (z[c] <= seaLevel) continue;
+    const zc = z[c];
+    let tot = 0;
+    for (let k = 0; k < 8; k++) {
+      const n = grid.nbr[c * 8 + k];
+      const s = (zc - z[n]) / grid.nbrDist[c * 8 + k];
+      // Cells within a bucket are visited in arbitrary order, so a neighbour at
+      // the same key may not be settled yet. Requiring a strictly positive
+      // slope keeps the pass acyclic regardless — z is depression-free, so
+      // every land cell has at least one.
+      const ww = s > 0 ? Math.pow(s, P) : 0;
+      w[k] = ww;
+      tot += ww;
+    }
+    if (tot <= 0) continue;
+    const a = acc[c] / tot;
+    for (let k = 0; k < 8; k++) if (w[k] > 0) acc[grid.nbr[c * 8 + k]] += a * w[k];
+  }
+
+  return acc;
 }
 
 /**
@@ -465,7 +563,145 @@ export interface LemResult {
   area: Float64Array;
   /** Receivers at the final state, for channel extraction. */
   flow: Flow;
+  /**
+   * Standing-water surface, metres. Equal to `z` on dry ground, above it over
+   * a lake. See the note on the final conditioning pass in runLEM.
+   */
+  water: Float32Array;
 }
+
+
+/**
+ * Distance to the nearest channel, metres, and the channel carved in.
+ *
+ * ── Why this is baked and not reconstructed ──
+ *
+ * The runtime used to find the channel axis from the wetness field's own
+ * derivatives: near its axis wetness is a smooth ridge, so the transverse
+ * gradient vanishes there and its magnitude is proportional to the distance.
+ * That is true, and it does not work. The estimator is built from a 9 km
+ * stencil, so it is noisy at exactly the scale the channel lives at, and the
+ * river came out as a chain of ponds — the mask flickered on and off along its
+ * own length. Widening it until it was stable gave a river 10 km across.
+ *
+ * The flow network is *already contiguous*: it is a tree, every channel cell
+ * has a receiver, and it was solved properly. Throwing that away at bake time
+ * and trying to recover it from a gradient at runtime was the mistake. So this
+ * measures the distance directly — a multi-source Dijkstra out from every
+ * channel cell, over the grid's own neighbour distances — and hands the
+ * runtime a field whose zero set *is* the network.
+ *
+ * A distance field is also the right thing to interpolate. Bilinear filtering
+ * of a distance is still a distance to within the cell size, so the runtime
+ * can place a 200 m river inside a 9 km texel and have it land in the right
+ * place and stay connected. Bilinear filtering of a *mask* cannot do that, and
+ * that is why every threshold-based attempt produced texel-shaped blobs.
+ *
+ * The carve is the same field applied to the elevation: a channel that the
+ * water sits in rather than on.
+ */
+export function carveChannels(
+  grid: Grid,
+  z: Float32Array,
+  area: Float64Array,
+  p: ChannelParams,
+  seaLevel = 0,
+): Float32Array {
+  const { count } = grid;
+  const dist = new Float32Array(count).fill(p.maxDistance);
+  const heap = new MinHeap(1 << 16);
+
+  // Sources: land cells carrying enough drainage to be a channel — the support
+  // area threshold, which is the standard definition of a channel head — plus
+  // the *shoreline*, so a coastal cell measures its distance to the sea rather
+  // than inland to the nearest river.
+  //
+  // The shoreline, not the whole ocean. Seeding every submerged cell is the
+  // obvious way to write that and it made the bake unusable: 4.5 M sources on
+  // the heap and essentially the entire sea floor relaxed, for a field only
+  // ever read on land. One ring of cells does the same job.
+  for (let c = 0; c < count; c++) {
+    if (z[c] > seaLevel) {
+      if (area[c] >= p.supportArea) {
+        dist[c] = 0;
+        heap.push(0, c);
+      }
+      continue;
+    }
+    for (let k = 0; k < 8; k++) {
+      if (z[grid.nbr[c * 8 + k]] > seaLevel) {
+        dist[c] = 0;
+        heap.push(0, c);
+        break;
+      }
+    }
+  }
+
+  while (heap.size > 0) {
+    const key = heap.peekKey();
+    const c = heap.pop();
+    // Stale entry: this cell was already settled at a shorter distance.
+    if (key > dist[c]) continue;
+    for (let k = 0; k < 8; k++) {
+      const n = grid.nbr[c * 8 + k];
+      // Land only. Nothing reads the distance under water, and relaxing into
+      // the sea is what made this the slowest pass in the bake.
+      if (z[n] <= seaLevel) continue;
+      const nd = key + grid.nbrDist[c * 8 + k];
+      if (nd < dist[n]) {
+        dist[n] = nd;
+        if (nd < p.maxDistance) heap.push(nd, n);
+      }
+    }
+  }
+
+  // Carve. Width and depth grow with the drainage the *channel* carries, and
+  // the profile is a parabola in the distance so the banks have a shape rather
+  // than being a step. Only cells inside a couple of widths are touched, which
+  // at this resolution is a handful either side of the axis.
+  for (let c = 0; c < count; c++) {
+    if (z[c] <= seaLevel) continue;
+    const a = Math.max(area[c], 1);
+    // Hydraulic geometry, widened to what a 9 km cell can express.
+    const w = Math.min(p.maxWidth, Math.max(p.minWidth, p.widthCoeff * Math.sqrt(a)));
+    const t = dist[c] / (w * 2.0);
+    if (t >= 1) continue;
+    const depth = Math.min(p.maxDepth, p.depthCoeff * Math.pow(a, 0.2));
+    z[c] -= depth * (1 - t * t);
+  }
+
+  return dist;
+}
+
+export interface ChannelParams {
+  /** Drainage area at which a channel head starts, m². */
+  supportArea: number;
+  /** Cap on the stored distance, metres. Beyond this the runtime sees "far". */
+  maxDistance: number;
+  widthCoeff: number;
+  minWidth: number;
+  maxWidth: number;
+  depthCoeff: number;
+  maxDepth: number;
+}
+
+export const DEFAULT_CHANNELS: ChannelParams = {
+  // 10^9.6 m². Chosen from the measured MFD distribution rather than guessed:
+  // multiple-flow accumulation puts the median land cell at 10^8.45, so a
+  // threshold anywhere near that calls half the planet a river.
+  // Raised from 10^9.6. That threshold put a channel head on roughly every
+  // valley the LEM resolved; the network it produced was denser than anything
+  // visible from orbit. 10^10.1 keeps the trunks and drops the tributaries
+  // that were never going to be more than a dark smear at this resolution.
+  supportArea: 10 ** 10.1,
+  maxDistance: 20_000,
+  // W ~ k*sqrt(Q). A 10^11 m² basin lands near 250 m.
+  widthCoeff: 0.0008,
+  minWidth: 120,
+  maxWidth: 2_600,
+  depthCoeff: 0.35,
+  maxDepth: 60,
+};
 
 /**
  * Run the model to (approximate) topographic steady state.
@@ -511,8 +747,34 @@ export function runLEM(
 
   // Final conditioning pass so the drainage handed to the runtime matches the
   // surface handed to the runtime.
-  fillDepressions(grid, z, seaLevel);
+  //
+  // Every previous fill was destructive, and rightly so: the model needs a
+  // depression-free surface to route across. This last one is kept separately,
+  // because the thing it destroys is the thing we want. A closed basin that the
+  // filler raises to its spill point is not a modelling artefact to be smoothed
+  // away — it is a lake, and raising the ground to the waterline is exactly how
+  // to make a lake invisible. Worse, the +ε gradient the filler leaves behind is
+  // in 8-neighbour BFS order from the spill point, and BFS parent chains on a
+  // grid are straight rays along the eight directions: route flow down that and
+  // the basin fills with perfectly straight rivers meeting at right angles.
+  // From orbit those read as rectangles drawn on the continent, which is how
+  // this was found.
+  //
+  // So: keep the basin in the terrain, and hand the filled level out as the
+  // water surface. The straight-line drainage still exists inside the basin and
+  // is now underwater, where it belongs and cannot be seen.
+  const zPreFill = Float32Array.from(z);
+  const water = Float32Array.from(z);
+  fillDepressions(grid, water, seaLevel);
+  z.set(water);
   flow = routeFlow(grid, z, areas, seaLevel);
+  // Restore the basins to the surface now that routing is done. Only genuine
+  // standing water survives the threshold: the filler's own ε is a millimetre
+  // per cell and would otherwise mark half the planet as a lake.
+  for (let c = 0; c < grid.count; c++) {
+    if (water[c] - zPreFill[c] > LAKE_MIN_DEPTH) z[c] = zPreFill[c];
+    else water[c] = z[c];
+  }
 
-  return { z, area: flow.area, flow };
+  return { z, area: flow.area, flow, water };
 }

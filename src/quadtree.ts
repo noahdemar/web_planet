@@ -27,6 +27,7 @@ import {
   MIN_ELEVATION,
   morphStartFor,
   RADIUS,
+  MIN_SELECT_LEVEL,
   VEG_LEVEL,
   VEG_TILE_RANGE,
   edgeLengthAt,
@@ -34,6 +35,7 @@ import {
 import { FACES, cubePoint, warp } from './cubesphere.js';
 import { type V3, addScaled, cross, dot, len, normalize, sub } from './math/vec3d.js';
 import { sampleSurface, type PlanetSurface } from './planetData.js';
+import { warpForCoast } from './heightCPU.js';
 
 export interface SelectStats {
   patches: number;
@@ -273,7 +275,26 @@ export class PatchSelector {
 
     if (d > this.distanceCap) return;
 
-    const subdivide = level < this.maxLevelCap && d <= this.ranges[level];
+    // A floor on subdivision, independent of distance.
+    //
+    // The LOD range is fitted to *geometric* error, and from orbit that is
+    // satisfied by level 1–2 — patches thousands of kilometres across, with
+    // 72 km between vertices. But the climate, the elevation and the normal all
+    // reach the fragment stage as varyings, and the albedo thresholds them:
+    // biome edges, the snow line, the shoreline. Thresholding a field that has
+    // been linearly interpolated over 72 km turns every one of those boundaries
+    // into a polygon, which is what made ice caps and deserts look faceted from
+    // 9000 km.
+    //
+    // MIN_SELECT_LEVEL puts vertices exactly one bake cell apart, so nothing
+    // downstream is interpolated further than the data it came from. It is
+    // derived from BAKE_RES rather than written down — see planet.ts, where it
+    // spent a while asserting 18 km was the cell size after the bake moved to
+    // 9 km. It costs little where it applies: from orbit the horizon and
+    // frustum culls leave a few hundred patches, and there is nothing else on
+    // screen.
+    const subdivide =
+      level < this.maxLevelCap && (level < MIN_SELECT_LEVEL || d <= this.ranges[level]);
     if (subdivide) {
       const i2 = i * 2;
       const j2 = j * 2;
@@ -339,30 +360,58 @@ export class PatchSelector {
     // gradient here replace five cube-map fetches per candidate cell, and
     // there are ~500 k candidates a frame.
     if (this.surface) {
-      const b = sampleSurface(this.surface, dirC[0], dirC[1], dirC[2]);
+      // Warped, like the terrain's own lookup — see warpForCoast. Sampling the
+      // true direction here would put every tree on the unwarped surface.
+      const dirW = warpForCoast(dirC, sampleSurface(this.surface, dirC[0], dirC[1], dirC[2]).elevation);
+      const b = sampleSurface(this.surface, dirW[0], dirW[1], dirW[2]);
       const e = FACE_EDGE / this.surface.size / RADIUS;
-      const at = (ax: V3, sg: number): number => {
-        const d = normalize([
-          dirC[0] + ax[0] * e * sg,
-          dirC[1] + ax[1] * e * sg,
-          dirC[2] + ax[2] * e * sg,
+      const at = (d: V3): { elevation: number; wetness: number; channelDist: number } =>
+        sampleSurface(this.surface!, d[0], d[1], d[2]);
+      const step = (base: V3, ax: V3, sg: number, k = 1): V3 =>
+        normalize([
+          base[0] + ax[0] * e * sg * k,
+          base[1] + ax[1] * e * sg * k,
+          base[2] + ax[2] * e * sg * k,
         ]);
-        return sampleSurface(this.surface!, d[0], d[1], d[2]).elevation;
-      };
+      const warped = (d: V3): V3 =>
+        warpForCoast(d, sampleSurface(this.surface!, d[0], d[1], d[2]).elevation);
       // U and V are tangent to the face, so they are never parallel to dirC
       // inside it — the same frame the terrain shader differences along.
       const tu = normalize(addScaled(U, dirC, -dot(U, dirC)));
       const tv = normalize(cross(dirC, tu));
-      const gu = (at(tu, 1) - at(tu, -1)) / (2 * e);
-      const gv = (at(tv, 1) - at(tv, -1)) / (2 * e);
+      const eM = e * RADIUS;
+
+      const up = at(warped(step(dirC, tu, 1)));
+      const um = at(warped(step(dirC, tu, -1)));
+      const vp = at(warped(step(dirC, tv, 1)));
+      const vm = at(warped(step(dirC, tv, -1)));
+      const gu = (up.elevation - um.elevation) / (2 * e);
+      const gv = (vp.elevation - vm.elevation) / (2 * e);
+
+      // Distance to the nearest channel, from the bake — see carveChannels.
+      const distAxisOf = (d: V3): number => at(warped(d)).channelDist;
+      const distAxisAt = b.channelDist;
+      const gdu = (distAxisOf(step(dirC, tu, 1, 2)) - distAxisOf(step(dirC, tu, -1, 2))) / (4 * eM);
+      const gdv = (distAxisOf(step(dirC, tv, 1, 2)) - distAxisOf(step(dirC, tv, -1, 2))) / (4 * eM);
+
       t[o + 20] = b.elevation;
       t[o + 21] = tu[0] * gu + tv[0] * gv;
       t[o + 22] = tu[1] * gu + tv[1] * gv;
       t[o + 23] = tu[2] * gu + tv[2] * gv;
       t[o + 24] = b.wetness;
-      t[o + 25] = 0;
-      t[o + 26] = 0;
+      t[o + 25] = b.lakeDepth;
+      // Distance to the drainage axis, from the same four taps read on
+      // wetness — see CHANNEL_WIDTH_K. Constant over the tile, which is fine:
+      // a tile is a few hundred metres and this varies over the bake's 9 km.
+      // Distance to the drainage axis and its gradient, reconstructed across
+      // the tile exactly as the elevation is — it drives a 45 m channel cut, so
+      // a per-tile constant would leave stems hanging that far off the ground.
+      t[o + 26] = distAxisAt;
       t[o + 27] = 0;
+      t[o + 28] = distAxisAt;
+      t[o + 29] = tu[0] * gdu + tv[0] * gdv;
+      t[o + 30] = tu[1] * gdu + tv[1] * gdv;
+      t[o + 31] = tu[2] * gdu + tv[2] * gdv;
     }
   }
 

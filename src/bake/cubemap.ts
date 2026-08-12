@@ -125,6 +125,10 @@ export function toAtlas(
   grid: Grid,
   elevation: Float32Array,
   wetness: Float32Array,
+  /** Standing-water depth, zero off water. See Baked.lakeDepth. */
+  lakeDepth: Float32Array,
+  /** Metres to the nearest channel or coast. See Baked.channelDist. */
+  channelDist: Float32Array,
   faceSize = grid.res,
 ): AtlasData {
   const cell = faceSize + 2 * ATLAS_PAD;
@@ -132,7 +136,6 @@ export function toAtlas(
   const height = cell * ATLAS_ROWS;
   const data = new Uint16Array(width * height * 4);
   const half = DataUtils.toHalfFloat;
-  const one = half(1);
 
   for (let f = 0; f < 6; f++) {
     const ox = (f % ATLAS_COLS) * cell;
@@ -145,8 +148,8 @@ export function toAtlas(
         const o = (py * width + px) * 4;
         data[o] = half(sampleGrid(grid, elevation, d));
         data[o + 1] = half(sampleGrid(grid, wetness, d));
-        data[o + 2] = 0;
-        data[o + 3] = one;
+        data[o + 2] = half(sampleGrid(grid, lakeDepth, d));
+        data[o + 3] = half(sampleGrid(grid, channelDist, d));
       }
     }
   }

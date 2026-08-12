@@ -16,11 +16,19 @@
 
 import { buildGrid, type Grid } from './grid.js';
 import { DEFAULT_TECTONICS, buildTectonics, type TectonicsParams } from './plates.js';
-import { DEFAULT_LEM, runLEM, type LemParams } from './lem.js';
+import {
+  DEFAULT_CHANNELS,
+  DEFAULT_LEM,
+  accumulateMFD,
+  carveChannels,
+  cellAreas,
+  runLEM,
+  type LemParams,
+} from './lem.js';
 import { DEFAULT_RELIEF, addBaseRelief, type ReliefParams } from './relief.js';
 
-/** Cells per cube-face edge. 512 → 1.57 M cells at ~18 km spacing. */
-export const BAKE_RES = 512;
+import { BAKE_RES } from '../planet.js';
+export { BAKE_RES };
 
 export interface BakeParams {
   res: number;
@@ -42,6 +50,22 @@ export interface Baked {
   elevation: Float32Array;
   /** log₁₀(drainage area in m²), clamped to [0, 14]. */
   wetness: Float32Array;
+  /**
+   * Standing-water *depth*, metres — zero on dry ground.
+   *
+   * Depth rather than surface elevation because this is what gets bilinearly
+   * magnified 11x at orbital range: interpolating a depth that falls to zero
+   * gives a shoreline that ramps, while interpolating a surface elevation
+   * against ground that is 200 m higher gives a step, and neither value is
+   * meaningful in between.
+   */
+  lakeDepth: Float32Array;
+  /**
+   * Distance to the nearest channel or coast, metres, capped. The runtime
+   * places rivers from this rather than reconstructing an axis — see
+   * carveChannels.
+   */
+  channelDist: Float32Array;
   /** Kept for diagnostics and for the runtime's coastline logic. */
   continental: Uint8Array;
   timings: Record<string, number>;
@@ -65,12 +89,33 @@ export function bake(params = DEFAULT_BAKE, onProgress?: Progress): Baked {
   );
   const tLem = Date.now();
 
+  // Drainage area for display comes from MFD, not from the D8 tree the erosion
+  // ran on: see accumulateMFD. `lem.area` is still the right input for stream
+  // power and is what the LEM used; this is the field the renderer draws.
+  // On lem.water, not lem.z: the basins are back in lem.z now (that is the
+  // point — a lake is a basin, not a plateau), and flow cannot route out of a
+  // depression. lem.water is the same surface with them filled, which is what
+  // every cell downstream of a lake needs in order to receive its area at all.
+  const mfd = accumulateMFD(grid, lem.water, cellAreas(grid));
+
+  // Lake depth *before* the carve, and the order is not cosmetic. lakeDepth is
+  // water level minus ground, and carveChannels lowers the ground by up to
+  // CHANNEL_DEPTH along every channel — so computing it afterwards turned the
+  // entire drainage network into a 60 m deep lake, which rendered as a system
+  // of blue texel-shaped ponds following every valley.
+  const lakeDepth = new Float32Array(grid.count);
+  for (let c = 0; c < grid.count; c++) lakeDepth[c] = Math.max(0, lem.water[c] - lem.z[c]);
+
+  // Then carve the network into the surface and measure the distance out from
+  // it. After the LEM, so it cuts the channel the model actually routed rather
+  // than one imposed on top of it.
+  const channelDist = carveChannels(grid, lem.z, mfd, DEFAULT_CHANNELS);
   const wetness = new Float32Array(grid.count);
   for (let c = 0; c < grid.count; c++) {
     // log area, not area: drainage spans ten orders of magnitude and every
     // downstream consumer (river width, valley depth, moisture) is logarithmic
     // in it anyway.
-    wetness[c] = Math.min(14, Math.log10(Math.max(1, lem.area[c])));
+    wetness[c] = Math.min(14, Math.log10(Math.max(1, mfd[c])));
   }
   onProgress?.('done', 1);
 
@@ -78,6 +123,8 @@ export function bake(params = DEFAULT_BAKE, onProgress?: Progress): Baked {
     res: params.res,
     elevation: lem.z,
     wetness,
+    lakeDepth,
+    channelDist,
     continental: tec.continental,
     timings: {
       grid: tGrid - t0,

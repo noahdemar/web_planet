@@ -32,9 +32,25 @@ function hash33(ix: number, iy: number, iz: number): void {
   x = (x ^ (x >>> 16)) >>> 0;
   y = (y ^ (y >>> 16)) >>> 0;
   z = (z ^ (z >>> 16)) >>> 0;
-  h[0] = (x + Math.imul(y, z)) >>> 0;
-  h[1] = (y + Math.imul(z, x)) >>> 0;
-  h[2] = (z + Math.imul(x, y)) >>> 0;
+  // Sequential, not parallel. Each line feeds the next — `p.y = p.y + p.z *
+  // p.x` in the shader reads the p.x written by the line above it, and `p.z`
+  // reads both. Writing this round straight into the output array instead
+  // evaluates all three from the pre-round values, which is a different
+  // function: x still agrees (it is the first assignment either way) and y and
+  // z disagree at every lattice point in the domain.
+  //
+  // That was the CPU/GPU height divergence. Two of the three gradient
+  // components were an unrelated field, so `heightAt` and the shader were
+  // describing different planets — measured 800 m apart in mountains, which is
+  // what put the camera in the air in walk mode and left the trees hanging.
+  // The first round has always been written this way; only the last three
+  // lines were not, and they read identically to the correct version.
+  x = (x + Math.imul(y, z)) >>> 0;
+  y = (y + Math.imul(z, x)) >>> 0;
+  z = (z + Math.imul(x, y)) >>> 0;
+  h[0] = x;
+  h[1] = y;
+  h[2] = z;
 }
 
 /** Gradient noise value, matching noised_(x).x in the shader. */
@@ -82,10 +98,8 @@ export function shaderNoise(x: number, y: number, z: number): number {
   );
 }
 
-/** Must match AMP_F0 in src/shaders/terrain.ts. */
-export const AMP_F0 = 260;
-/** Must match RIDGE_MEAN in src/shaders/terrain.ts; see tools/ridgeMean.ts. */
-export const RIDGE_MEAN = 0.7452;
-/** Must match AMP_BASE / AMP_RELIEF in src/shaders/terrain.ts. */
-export const AMP_BASE = 70;
-export const AMP_RELIEF = 7800;
+/*
+ * The amplification constants used to be duplicated here, with a comment on
+ * each saying it must match the one in src/shaders/terrain.ts. Both sides now
+ * import them from src/planet.ts, so there is nothing left to keep in sync.
+ */

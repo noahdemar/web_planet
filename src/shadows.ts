@@ -22,6 +22,7 @@
 
 import {
   type Camera,
+  Color,
   Matrix4,
   NearestFilter,
   OrthographicCamera,
@@ -50,6 +51,15 @@ const BASE_RADII = [55, 260, 1300];
 
 /** Above this altitude shadows contribute nothing and are switched off. */
 export const SHADOW_MAX_ALTITUDE = 14_000;
+
+/**
+ * Clear value for a shadow map texel no caster wrote to. See the note in
+ * render(). Large and negative so the lit test always passes there.
+ */
+const NO_OCCLUDER = new Color();
+NO_OCCLUDER.r = -1e9;
+NO_OCCLUDER.g = -1e9;
+NO_OCCLUDER.b = -1e9;
 
 /** How far the light frustum extends behind the receivers, to catch casters. */
 const CASTER_DEPTH = 4500;
@@ -194,7 +204,20 @@ export class Shadows {
       });
 
       renderer.setRenderTarget(this.targets[i]);
-      renderer.setClearColor(0xffffff, 1); // "nothing here" = maximally far
+      // "Nothing here" has to mean *nothing occludes*, and the stored value is
+      // signed distance along the light in metres — so the sentinel belongs at
+      // minus infinity, not at white.
+      //
+      // It was 0xffffff, i.e. 1.0, which reads as "there is an occluder one
+      // metre along the light from the camera". The lit test is
+      // frag + bias >= stored, and frag is dot(rel, sunDir), so every point
+      // with dot(rel, sunDir) < 1 came back shadowed — and that set is a
+      // half-space. Its boundary is a plane through the camera, which is why
+      // the artefact was a hard *straight-edged* wedge sitting on the ground
+      // beside the camera at every low altitude, covering roughly the half of
+      // the world facing away from the sun. The map is R32F, so a real
+      // sentinel costs nothing; Color carries raw floats without clamping.
+      renderer.setClearColor(NO_OCCLUDER, 1);
       renderer.clear();
       renderer.render(scene, this.cams[i] as unknown as Camera);
     }

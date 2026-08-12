@@ -24,6 +24,9 @@ import {
 } from './math/vec3d.js';
 
 const MIN_CLEARANCE = 1.7; // eye height when ground-following
+/** Walking pace, m/s. Ctrl runs. */
+const WALK_SPEED = 1.5;
+const RUN_MULTIPLIER = 3.4;
 
 /** Keeps the view direction clear of the local vertical, where the basis dies. */
 const PITCH_LIMIT = Math.PI / 2 - 0.05;
@@ -72,6 +75,14 @@ export class FlyControls {
   pitch = -Math.PI / 2.2;
   speedMul = 1;
   groundFollow = false;
+
+  /**
+   * Walk mode. Ground-follow already pins the camera to MIN_CLEARANCE, which
+   * is eye height, so most of this is taking things *away*: no vertical
+   * thrust, and a fixed human speed instead of one that scales with altitude.
+   * Without those two you are still flying, just at ground level.
+   */
+  walk = false;
   /** Vertical look inversion, toggled with I. Horizontal is never inverted. */
   invertY = false;
 
@@ -119,6 +130,10 @@ export class FlyControls {
 
   /** Metres per second at the current altitude, before the user multiplier. */
   get speed(): number {
+    // A person walks at 1.4 m/s and runs at 5. Altitude-scaled speed happens
+    // to give 1.4 at eye height, but it climbs the moment the ground does, so
+    // walking uphill would accelerate you.
+    if (this.walk) return WALK_SPEED * this.speedMul;
     const a = Math.max(1, this.altitude);
     return Math.min(3e6, Math.max(1.4, a * 0.45)) * this.speedMul;
   }
@@ -206,9 +221,12 @@ export class FlyControls {
     const k = this.keys;
     const fwd = (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0);
     const str = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0);
-    const vert = (k.has('Space') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') ? 1 : 0);
+    const vert = this.walk
+      ? 0
+      : (k.has('Space') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') ? 1 : 0);
 
-    const boost = k.has('ControlLeft') || k.has('ControlRight') ? 8 : 1;
+    const running = k.has('ControlLeft') || k.has('ControlRight');
+    const boost = running ? (this.walk ? RUN_MULTIPLIER : 8) : 1;
     const v = this.speed * boost * dt;
 
     if (fwd) this.pos = addScaled(this.pos, this.forward, fwd * v);
@@ -220,8 +238,9 @@ export class FlyControls {
     const ground = RADIUS + this.groundHeight();
     const r = len(this.pos);
     const floor = ground + MIN_CLEARANCE;
-    if (this.groundFollow || r < floor) {
-      const target = this.groundFollow ? floor : Math.max(r, floor);
+    const pinned = this.groundFollow || this.walk;
+    if (pinned || r < floor) {
+      const target = pinned ? floor : Math.max(r, floor);
       const s = target / r;
       this.pos = [this.pos[0] * s, this.pos[1] * s, this.pos[2] * s];
     }
@@ -254,6 +273,24 @@ export class FlyControls {
     this.pitch = -1.32; // steeply down, but clear of the pole
     this.speedMul = 1;
     this.groundFollow = false;
+  }
+
+  /**
+   * Enter or leave walk mode. Entering drops the camera to the surface under
+   * it rather than leaving it in the air, so the button is one click rather
+   * than a click and then a fall.
+   */
+  setWalk(on: boolean): void {
+    this.walk = on;
+    this.groundFollow = on;
+    this.speedMul = 1;
+    if (on) {
+      const d = normalize(this.pos);
+      const g = RADIUS + this.groundHeight() + MIN_CLEARANCE;
+      this.pos = [d[0] * g, d[1] * g, d[2] * g];
+      // Looking at the horizon, not at your feet or at the sky.
+      this.pitch = Math.max(-0.35, Math.min(0.25, this.pitch));
+    }
   }
 
   /** Move to the most rugged land on the planet, at eye height. */

@@ -12,7 +12,9 @@ M2/M3.
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm run verify     # typecheck + precision + hypsometry
+npm run verify     # typecheck + shaders + precision + mirror + biomes + realism
+npm run realism    # the fast gate: 24 fixed sites vs a stored baseline, ~4 s
+npm run slopes     # slope distribution vs sampling scale
 ```
 
 Needs WebGPU (Chrome/Edge 113+, Safari 18+). WebGL2 is not a fallback — the
@@ -32,7 +34,7 @@ bake pipeline at M3 requires compute shaders.
 | `;` `'` | vegetation density · `N` read instance counts |
 | `O` / `P` | sun elevation / azimuth (hold Shift to reverse) |
 | `H` | shadows on·off · `I` invert vertical look |
-| `1`–`6` | shading: natural, LOD, slope, normals, cover, albedo |
+| `1`–`7` | shading: natural, LOD, slope, normals, cover, albedo, climate |
 | `G` | metric grid: off → 100 m → 10 m → 1 m → 10 cm |
 | `[` `]` | LOD factor · `,` `.` octaves · `-` `=` max level |
 
@@ -137,13 +139,23 @@ expected behaviour for a log-scale LOD.
 
 ## Known limits
 
-**Detail bottoms out at ~19 m features.** Not an octave-count problem. The
+**Detail bottoms out at ~35 m features.** Not an octave-count problem. The
 field is evaluated at `dir * F` from a unit vector, so the fractional position
-inside a noise cell is quantised to `F · 2⁻²³`; past 17 octaves that exceeds
-~4% of a cell and the field visibly steps. No octave count fixes it — the limit
-is intrinsic to evaluating a global function from a unit vector in f32. Detail
-below ~20 m arrives at M5/M6 by sampling per-tile data instead, which sidesteps
-the problem entirely (SPEC.md §6). Press `.` past 17 to watch it break.
+inside a noise cell is quantised to `F · 2⁻²³`; once that exceeds ~4% of a cell
+the field visibly steps. No octave count fixes it — the limit is intrinsic to
+evaluating a global function from a unit vector in f32. Detail below ~35 m
+arrives at M5/M6 by sampling per-tile data instead, which sidesteps the problem
+entirely (SPEC.md §6). Press `.` past the ceiling to watch it break.
+
+The ceiling is now *derived* from `AMP_F0` rather than hard-coded
+(`maxOctavesFor` in [src/planet.ts](src/planet.ts)). It had been a literal 17,
+which was right for M1's base frequency of ~3 and silently wrong once M3 raised
+the start to 260 to sit under the bake's Nyquist: at 260 the real ceiling is 10
+octaves, so seven of them ran at frequencies where one ULP of the direction
+vector moves whole lattice cells — 3.5 of them by the last. They cost eight
+hash evaluations each per vertex and returned quantisation noise, and because
+they were also the steepest octaves they were most of what made mountains
+render as vertical facets.
 
 **Vegetation and ground still differ in texture at the handoff.** Tone now
 matches, and the fade has no hard edge, but instanced crowns have relief and
@@ -199,8 +211,48 @@ src/
     vegetation.ts WGSL: scatter candidate, billboard, foliage shading
 tools/
   precision.ts    f32 vs f64 vertex error, per level
-  hypsometry.ts   elevation distribution vs Earth; parameter solver
+  mirror.ts       what the renderer draws, vs Earth's curve; CPU/GPU agreement
+  slopes.ts       slope distribution vs sampling scale; the convergence check
+  bakeSweep.ts    tectonic parameters against the hypsographic curve
 ```
+
+`npm run slopes` is the one to reach for after touching the amplification. It
+reports the slope distribution at 300 m down to 3 m sampling, and the number
+that matters is not the level but whether the increments *shrink*: an fBm with
+H < 1 has no slope limit, so it gets steeper without bound the closer you look,
+and a hypsometric curve can be perfect while the surface between those
+elevations is a field of vertical facets.
+
+### Checking realism
+
+Two halves of one suite, over the same 24 fixed sites — every biome at both the
+flat and the steep end of its relief range, plus a shoreline and a trunk valley
+floor. The site table is `src/tour.ts`.
+
+```bash
+npm run realism              # check against tools/realism.baseline.json
+npm run realism -- --update  # accept the current numbers as the baseline
+```
+
+It measures, per site, the median slope at 300 m / 30 m / 3 m, the ratio
+between the outer two — which is the signature the per-biome octave spectrum
+controls — the relief over a 5 km transect, and the spectrum the biome table
+asks for; then land fraction, the amplification's zero mean, and the biome
+shares planet-wide. Four seconds, CPU only, exits non-zero on drift.
+
+What a number cannot check is whether it *looks* like anywhere, so the same
+list is a camera tour in the running app:
+
+```js
+sim.tour()                 // list the sites
+sim.tour('chaparral-steep')
+sim.tour(17, 12000)        // the same site from 12 km
+sim.tour.next()            // step through, wrapping
+```
+
+The sun is aimed in each site's own horizon frame, so the light is identical
+relative to the camera at every stop — otherwise one azimuth means a different
+thing at each site and half the tour comes out backlit.
 
 `sim` is exposed on `window` for driving from the console:
 `sim.controls`, `sim.terrain`, `sim.selector`, `sim.vegetation`,

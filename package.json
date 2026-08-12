@@ -3,19 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Planetary terrain generator — orbit to ground, fully procedural.",
+  "description": "Planetary terrain generator \u2014 orbit to ground, fully procedural.",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "precision": "tsx tools/precision.ts",
-    "verify": "tsc --noEmit && tsx tools/checkShaders.ts && tsx tools/precision.ts && tsx tools/mirror.ts",
+    "verify": "tsc --noEmit && tsx tools/checkShaders.ts && tsx tools/precision.ts && tsx tools/mirror.ts && tsx tools/biomes.ts && tsx tools/realism.ts",
     "check:shaders": "tsx tools/checkShaders.ts",
     "bake": "tsx tools/bake.ts",
     "bake:sweep": "tsx tools/bakeSweep.ts",
     "ridgemean": "tsx tools/ridgeMean.ts",
-    "mirror": "tsx tools/mirror.ts"
+    "slopes": "tsx tools/slopes.ts",
+    "mirror": "tsx tools/mirror.ts",
+    "biomes": "tsx tools/biomes.ts",
+    "realism": "tsx tools/realism.ts"
   },
   "dependencies": {
     "three": "0.185.1"

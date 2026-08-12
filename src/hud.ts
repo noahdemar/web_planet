@@ -47,7 +47,12 @@ export interface HudState {
   gpu: { render: number; compute: number; drawCalls: number; triangles: number };
 }
 
-const MODES = ['natural', 'LOD level', 'slope', 'normals', 'canopy cover', 'albedo'];
+const MODES = [
+  'natural', 'LOD level', 'slope', 'normals', 'canopy cover', 'albedo', 'climate',
+  // Encoded for sim.probeHeight() rather than for the eye — see the mode 7
+  // branch in shaders/terrain.ts.
+  'elevation (readback)',
+];
 
 export class Hud {
   private el: HTMLElement;
@@ -114,11 +119,12 @@ export class Hud {
       <div class="hint">
         <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> fly ·
         <kbd>Space</kbd>/<kbd>Shift</kbd> up·down · <kbd>Ctrl</kbd> boost<br />
-        drag to look · wheel = speed · <kbd>F</kbd> ground-follow<br />
+        drag to look · wheel = speed · <kbd>F</kbd> walk / fly<br />
         <kbd>1</kbd>–<kbd>4</kbd> shading · <kbd>G</kbd> metric grid ·
         <kbd>[</kbd><kbd>]</kbd> LOD<br />
         <kbd>,</kbd><kbd>.</kbd> octaves · <kbd>-</kbd><kbd>=</kbd> max level<br />
         <kbd>L</kbd> rugged land · <kbd>T</kbd> surface · <kbd>R</kbd> reset<br />
+        <kbd>K</kbd> day cycle / follow sun · <kbd>J</kbd> pause the day<br />
         <kbd>V</kbd> vegetation · <kbd>B</kbd> bands · <kbd>;</kbd><kbd>'</kbd> density ·
         <kbd>N</kbd> count
       </div>

@@ -34,6 +34,49 @@ const ADAPT_DOWN = 1.6; // toward darker — dark adaptation is slower
 const MIN_EXPOSURE = 0.02;
 const MAX_EXPOSURE = 4.0;
 
+/**
+ * The same ceiling from orbit, where opening up is the wrong instinct.
+ *
+ * On the ground, opening up in deep shade is right — an eye does it, and there
+ * is always something in frame that the extra stops reveal. From orbit on the
+ * night side there is nothing to open up *for*: the frame is black space and
+ * an unlit hemisphere, the metered key falls to 0.006, and `TARGET / key` asks
+ * for 27 stops. It got MAX_EXPOSURE, 4.0 — against 0.20 for the same view in
+ * daylight, so the night hemisphere was amplified twentyfold and clipped to a
+ * flat white sheet, taking the atmosphere limb and the sunlit crescent with
+ * it. Measured directly: renderer.toneMappingExposure read 4.000 in orbit over
+ * the anti-solar point.
+ *
+ * 0.6 is what the terminator meters at under the disc-average illumination
+ * below, so the night side now settles at roughly the exposure that renders
+ * the lit limb correctly and leaves the dark hemisphere dark. Which is what a
+ * camera pointed at a night side does.
+ */
+const MAX_EXPOSURE_ORBIT = 0.6;
+
+/**
+ * Altitude by which that ceiling is fully in force, metres.
+ *
+ * Its own ramp rather than `orbital`, which is fitted to when the *albedo*
+ * stops being one surface and does not reach 1 until 2230 km. The ceiling is
+ * answering a different question — when does the frame contain the sunlit limb
+ * and the atmosphere ring, which are orders of magnitude brighter than unlit
+ * ground and are what actually clips. That is when the planet reads as a body
+ * rather than a place, a few hundred kilometres up. At 400 km, a perfectly
+ * ordinary place to look at the night side from, `orbital` is only 0.18 and
+ * left the ceiling at 3.39 — still a five-fold over-exposure.
+ *
+ * Deliberately *not* applied at low altitude: opening up at night on the
+ * ground is correct and intended, and this must not undo it.
+ */
+const ORBIT_CEILING_ALT = 300_000;
+
+/**
+ * Mean cosine of incidence over the lit half of a sphere, weighted by
+ * projected area — 2/3 for a Lambertian disc at full phase.
+ */
+const DISC_LIT_COS = 0.66;
+
 /** Sun irradiance used by the shaders. Must match `sunColour` in main.ts. */
 export const SUN_IRRADIANCE = 17;
 
@@ -74,15 +117,32 @@ export class AutoExposure {
     // up over an ocean and blow out the continent in the same view.
     const orbital = Math.min(1, altitude / (RADIUS * 0.35));
     const albedo = albedoAt(groundElev) * (1 - orbital) + PLANET_ALBEDO * orbital;
-    const direct = (SUN_IRRADIANCE * cosSun * albedo) / Math.PI;
-    const sky = SUN_IRRADIANCE * 0.09 * albedo * (0.03 + 0.6 * cosSun);
+
+    // The illumination has to become a disc average wherever the albedo does,
+    // and it did not. That mismatch is the whole bug: from orbit the albedo
+    // was already the whole planet's average while the *lighting* was still
+    // the single point under the camera, so crossing the terminator dropped
+    // the metered irradiance to zero for a frame that still had a sunlit limb
+    // in it.
+    //
+    // From orbit sunDotUp is the cosine of the phase angle, so (1+s)/2 is the
+    // classic phase function: 1 with the sun behind the camera, 0.5 over the
+    // terminator, 0 looking into the shadow cone. Times the disc's own mean
+    // cosine, that is the mean irradiance of what is actually in frame.
+    const phase = 0.5 * (1 + sunDotUp);
+    const cosMeter = cosSun + (DISC_LIT_COS * phase - cosSun) * orbital;
+
+    const direct = (SUN_IRRADIANCE * cosMeter * albedo) / Math.PI;
+    const sky = SUN_IRRADIANCE * 0.09 * albedo * (0.03 + 0.6 * cosMeter);
 
     // From orbit much of the frame is black space, but metering that in would
     // push the exposure up and blow out the disc. Discount it instead.
     const fill = 1 - 0.35 * orbital * orbital;
 
     const key = Math.max(1e-4, (direct + sky) * fill);
-    const target = Math.min(MAX_EXPOSURE, Math.max(MIN_EXPOSURE, TARGET / key));
+    const aloft = Math.min(1, altitude / ORBIT_CEILING_ALT);
+    const ceiling = MAX_EXPOSURE + (MAX_EXPOSURE_ORBIT - MAX_EXPOSURE) * aloft;
+    const target = Math.min(ceiling, Math.max(MIN_EXPOSURE, TARGET / key));
 
     const tau = target > this.value ? ADAPT_UP : ADAPT_DOWN;
     // Exponential approach, frame-rate independent.

@@ -11,28 +11,40 @@ import { WebGPURenderer } from 'three/webgpu';
 import { DEFAULT_LOD_FACTOR, MAX_LEVEL, RADIUS } from './planet.js';
 import { loadPlanetSurface } from './planetData.js';
 import { AutoExposure } from './exposure.js';
-import { setPlanetSurface } from './heightCPU.js';
+import { ALTITUDES, SITES } from './tour.js';
+import { heightAt, setPlanetSurface } from './heightCPU.js';
 import { PatchSelector } from './quadtree.js';
 import { TerrainMesh, type ShadeMode } from './terrainMesh.js';
 import { FlyControls } from './controls.js';
+import { Grass } from './grass.js';
 import { Hud } from './hud.js';
 import { directionToFace } from './cubesphere.js';
 import { normalize } from './math/vec3d.js';
-import { auditCracks } from './devAudit.js';
+import { auditCracks, probeDrawnHeight } from './devAudit.js';
 import { Vegetation } from './vegetation.js';
 import { Sky } from './sky.js';
+import { Clouds } from './clouds.js';
 import { CASCADES, Shadows } from './shadows.js';
 import { createShadowUniforms, makeShadowFactor } from './shaders/shadowSample.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
 
 /**
- * LOD factor for the shadow pass. Much coarser than the display value: the
- * cost is per vertex, and a shadow map cannot resolve detail finer than its
- * own texel. Too low and the caster surface diverges from the receiver's,
- * which shows up as false self-shadowing.
+ * LOD factor for the shadow pass.
+ *
+ * Was 1.1 against the display's 2.2 — half the linear tessellation, so the
+ * caster mesh was about four times coarser in area than the surface receiving
+ * the shadow. A shadow silhouette then follows the *caster's* triangle edges,
+ * and near the ground that read as a comb of triangular teeth along every
+ * light/dark boundary. The argument for coarsening it was that a cascade texel
+ * is 1.4 m so finer geometry cannot be recorded — true for the far cascade and
+ * false for the near one, which is exactly where the teeth were.
+ *
+ * 2.0 keeps a little of the saving and puts the caster within one level of the
+ * receiver almost everywhere. The pass is vertex-bound, so this is the lever
+ * to pull back if the shadow pass ever shows up in the frame budget.
  */
-const SHADOW_LOD_FACTOR = 1.1;
+const SHADOW_LOD_FACTOR = 2.0;
 
 function fatal(err: unknown): void {
   const box = document.getElementById('err')!;
@@ -58,9 +70,40 @@ async function main(): Promise<void> {
     // Real GPU time per pass. CPU-side timing measures queue submission, not
     // work, and every performance decision here has been guesswork without it.
     trackTimestamp: true,
-    // The orbit-to-ground depth range is ~7 orders of magnitude; a linear
-    // depth buffer cannot hold it (SPEC.md §7).
-    logarithmicDepthBuffer: true,
+    // ── no logarithmic depth ──────────────────────────────────────────────
+    //
+    // SPEC.md §7 asks for this because the orbit-to-ground depth range spans
+    // ~7 orders of magnitude. What actually solves that here is the *adaptive*
+    // near/far below: both are recomputed every frame from altitude, so a
+    // single frame never spans more than it has to. Logarithmic depth was the
+    // second belt, and it was tearing holes in the mesh.
+    //
+    // three's WebGPU path evaluates the log depth per *vertex* and lets the
+    // rasteriser interpolate it. Log depth is not linear in screen space, so
+    // the interpolated value is wrong across a triangle's interior, and it is
+    // most wrong where the depth gradient across the triangle is steepest.
+    // Fragments then lose the depth test against nothing and the background
+    // shows through. That is exactly where the two long-standing artefacts
+    // were: coastlines seen from above, where a triangle spans sea level and a
+    // hillside, and flat ground at grazing angles, where a triangle spans
+    // hundreds of metres of range. The first was "small dark speckles along
+    // coastlines" (LESSONS §13) and the second read as a picket fence of
+    // slivers at patch borders, which is why it looked like a skirt problem.
+    //
+    // Measured with sim.audit() over the same coastline, all patches at one
+    // level, background pixels enclosed by terrain:
+    //
+    //   lodFactor 1.2 / 2.2 / 4.4    on: 0.116% / 0.158% / 0.292%
+    //                               off: 0.000% / 0.000% / 0.000%
+    //
+    // The cost is real and worth stating: at eye height near is 5 cm and far
+    // reaches past the horizon for distant peaks, so a 24-bit buffer is spread
+    // thin at range. Nothing in the scene is coplanar out there — the terrain
+    // is one surface, the skirt hangs below it, and vegetation is inside the
+    // near few kilometres where precision is ample — so it does not show. If
+    // z-fighting ever does appear on distant terrain, this is the line that
+    // bought it, and the fix is reversed-Z rather than turning this back on.
+    logarithmicDepthBuffer: false,
   });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
@@ -95,8 +138,16 @@ async function main(): Promise<void> {
   const sky = new Sky();
   scene.add(sky.mesh);
 
+  const clouds = new Clouds();
+  scene.add(clouds.mesh);
+
   const vegetation = new Vegetation(shadowOf);
   for (const m of vegetation.meshes) scene.add(m);
+
+  // Ground clutter. Its own pass rather than a fourth vegetation band — see
+  // the note at the top of grass.ts.
+  const grass = new Grass(shadowOf);
+  scene.add(grass.mesh);
 
   const shadowCasters = [
     { mesh: terrain.mesh, depthMaterial: terrain.depthMaterial },
@@ -113,6 +164,43 @@ async function main(): Promise<void> {
   const controls = new FlyControls(renderer.domElement);
   const hud = new Hud(document.getElementById('hud')!);
 
+  // ── walk / fly toggle ──────────────────────────────────────────────────
+  //
+  // A button rather than only a key, because the one thing a new viewer wants
+  // to do with a planet is stand on it, and there is no way to guess a
+  // keybinding. It stays in sync with the G key, which does the same thing.
+  const walkBtn = document.createElement('button');
+  walkBtn.id = 'walk';
+  walkBtn.style.cssText = [
+    'position:fixed',
+    'left:16px',
+    'bottom:16px',
+    'z-index:10',
+    'padding:10px 16px',
+    'font:13px ui-monospace,SFMono-Regular,Menlo,monospace',
+    'letter-spacing:0.08em',
+    'text-transform:uppercase',
+    'color:#dfe6df',
+    'background:rgba(12,18,14,0.72)',
+    'border:1px solid rgba(190,220,190,0.35)',
+    'border-radius:4px',
+    'cursor:pointer',
+    'backdrop-filter:blur(6px)',
+  ].join(';');
+  const syncWalkBtn = (): void => {
+    walkBtn.textContent = controls.walk ? 'Fly' : 'Walk';
+    walkBtn.title = controls.walk
+      ? 'Back to free flight (G)'
+      : 'Stand on the surface and walk — WASD, Ctrl to run (G)';
+  };
+  walkBtn.addEventListener('click', () => {
+    controls.setWalk(!controls.walk);
+    syncWalkBtn();
+    renderer.domElement.focus();
+  });
+  syncWalkBtn();
+  document.body.appendChild(walkBtn);
+
   let lodFactor = DEFAULT_LOD_FACTOR;
   let maxLevel = MAX_LEVEL;
   let gridIdx = 0;
@@ -124,7 +212,8 @@ async function main(): Promise<void> {
 
   addEventListener('keydown', (e) => {
     switch (e.code) {
-      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5': case 'Digit6':
+      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
+      case 'Digit5': case 'Digit6': case 'Digit7':
         terrain.setMode((+e.code.slice(5) - 1) as ShadeMode);
         break;
       case 'KeyG':
@@ -154,7 +243,10 @@ async function main(): Promise<void> {
         selector.setMaxLevel(maxLevel);
         break;
       case 'KeyF':
-        controls.groundFollow = !controls.groundFollow;
+        // Walk supersedes plain ground-follow: it is the same pinning plus the
+        // two constraints that stop it being flight at ankle height.
+        controls.setWalk(!controls.walk);
+        syncWalkBtn();
         break;
       case 'KeyT':
         controls.dropToSurface();
@@ -174,8 +266,14 @@ async function main(): Promise<void> {
         aimSun(sunEl, sunAz);
         break;
       case 'KeyK':
+        // Off the clock and onto the camera-following sun, which is a
+        // debugging aid: it guarantees the ground in front of you is lit.
         sunFollow = !sunFollow;
         if (sunFollow) aimSun(sunEl, sunAz);
+        else applySun(sunFromClock());
+        break;
+      case 'KeyJ':
+        dayRunning = !dayRunning;
         break;
       case 'KeyH':
         shadowsOn = !shadowsOn;
@@ -216,7 +314,12 @@ async function main(): Promise<void> {
 
     controls.setTerrain(terrain.octaves, terrain.heightScale);
     controls.update(dt, camera);
-    if (sunFollow) aimSun(sunEl, sunAz);
+    if (sunFollow) {
+      aimSun(sunEl, sunAz);
+    } else {
+      if (dayRunning) timeOfDay = (timeOfDay + dt / dayLength) % 1;
+      applySun(sunFromClock());
+    }
 
     // Meter before rendering, from this frame's camera.
     {
@@ -241,6 +344,11 @@ async function main(): Promise<void> {
     terrain.setCameraPosition(controls.pos[0], controls.pos[1], controls.pos[2]);
     terrain.setReferenceRadius(controls.groundRadius);
     sky.update(controls.pos[0], controls.pos[1], controls.pos[2], camera.near);
+    clouds.update(controls.pos[0], controls.pos[1], controls.pos[2], now * 0.001);
+    // The ground samples the same cloud field to shadow itself — see the cloud
+    // shadow block in shadeTerrain. Same coverage, same clock, or the shadow
+    // separates from the cloud casting it.
+    terrain.setClouds(clouds.coverage, now * 0.001);
     // Pixels subtended by a one-metre object at one metre — drives the
     // sub-pixel vegetation fade, so it must track viewport and field of view.
     vegetation.setProjectionScale(
@@ -259,7 +367,20 @@ async function main(): Promise<void> {
     // is ever touched by the CPU (SPEC.md §8).
     vegetation.setCamera(controls.pos[0], controls.pos[1], controls.pos[2]);
     vegetation.setOctaves(terrain.octaves);
+    vegetation.setLodFactor(lodFactor);
     vegetation.update(renderer, selector.vegTileData, stats.vegTiles);
+    grass.update(
+      renderer,
+      surface,
+      controls.pos as readonly [number, number, number],
+      terrain.octaves,
+      1,
+      now * 0.001,
+      controls.altitude, // already the clearance above the surface
+      controls.forward,
+      camera.fov,
+      camera.aspect,
+    );
 
     // Shadow pass before the main render: cascades are placed from this
     // frame's camera, and the sky is excluded because it would fill every map.
@@ -289,7 +410,22 @@ async function main(): Promise<void> {
           camera.projectionMatrix,
         );
         terrain.update(shadowStats.patches);
-        shadows.render(renderer, scene, shadowCasters, [sky.mesh]);
+        // Hidden for the shadow pass: everything in the scene that is *not*
+        // a registered caster and therefore keeps its display material.
+        //
+        // Those materials sample the shadow maps, and during this pass the maps
+        // are render attachments — binding a texture for reading while it is
+        // attached for writing fails WebGPU validation and invalidates the
+        // whole command buffer, so the shadow pass silently produced nothing.
+        // Casters are safe because their material is swapped for a depth one
+        // that samples no shadows; the sky and cloud domes were already here
+        // for a different reason (they would fill every map).
+        shadows.render(renderer, scene, shadowCasters, [
+          sky.mesh,
+          clouds.mesh,
+          grass.mesh,
+          ...vegetation.meshes.slice(2),
+        ]);
         renderer.setClearColor(0x000000, 1);
 
         // Restore the display selection.
@@ -379,7 +515,9 @@ async function main(): Promise<void> {
     ).normalize();
     terrain.setSun(sun, sunColour);
     vegetation.setSun(sun, sunColour);
+    grass.setSun(sun, sunColour);
     sky.setSun(sun, sunColour);
+    clouds.setSun(sun, sunColour);
   }
 
   let sunEl = 38;
@@ -397,10 +535,101 @@ async function main(): Promise<void> {
    * Press K for a world-fixed sun, which is what you want to watch a real
    * terminator sweep, and wrong for everything else.
    */
-  let sunFollow = true;
+  let sunFollow = false;
+
+  // ── true day and night ────────────────────────────────────────────────
+  //
+  // `sunFollow` re-aims the sun from the *camera's* local up every frame, so
+  // wherever you stand it is mid-morning: there is no night on this planet and
+  // never has been, only a terminator drawn from orbit by the fact that the
+  // sub-camera point is not the sub-solar one.
+  //
+  // A real cycle is one world-fixed direction that rotates about the planet's
+  // spin axis. The planet does not turn — nothing here is in a rotating frame —
+  // so turning the sun the other way is the same thing and costs nothing.
+  //
+  // The declination is the season: the axis is tilted, so the sub-solar point
+  // moves off the equator and the poles get their midnight sun and their polar
+  // night out of the same two lines. Held at a fixed value rather than run on
+  // a second, year-long clock, because a season that changes while you watch
+  // is a worse lie than one that does not change at all.
+  const AXIAL_TILT = (23.44 * Math.PI) / 180;
+  /** Seasonal phase, 0 = equinox, ±1 = solstice. */
+  let season = 0.38;
+  /** Fraction of a day, [0,1). */
+  let timeOfDay = 0.31;
+  /** Seconds of wall clock per planetary day. Scrub with , and . */
+  let dayLength = 240;
+  let dayRunning = true;
+
+  function sunFromClock(): Vector3 {
+    const a = timeOfDay * Math.PI * 2;
+    const decl = Math.sin(season * Math.PI * 0.5) * AXIAL_TILT;
+    // +Y is the spin axis, matching the latitude the climate uses (|dir.y|).
+    return new Vector3(
+      Math.cos(a) * Math.cos(decl),
+      Math.sin(decl),
+      Math.sin(a) * Math.cos(decl),
+    ).normalize();
+  }
+
+  function applySun(dir: Vector3): void {
+    sun.copy(dir).normalize();
+    terrain.setSun(sun, sunColour);
+    vegetation.setSun(sun, sunColour);
+    grass.setSun(sun, sunColour);
+    sky.setSun(sun, sunColour);
+    clouds.setSun(sun, sunColour);
+  }
   aimSun(sunEl, sunAz);
 
   const exposure = new AutoExposure();
+  /** Where sim.tour.next() is up to. */
+  let tourAt = 0;
+
+  /**
+   * The visual half of the realism suite — see src/tour.ts.
+   *
+   * `npm run realism` checks everything about these sites that is a number.
+   * This is for everything that is not: whether the ground reads as a place,
+   * whether the biome's colour and its shape describe the same country,
+   * whether a horizon looks like a horizon. Same fixed sites, so the two
+   * halves are talking about the same planet.
+   *
+   *   sim.tour()                  list the sites
+   *   sim.tour('desert-flat')     or sim.tour(3)
+   *   sim.tour(3, 12000)          the same site from 12 km
+   *   sim.tour.next()             step through, wrapping
+   *
+   * The sun is aimed in the site's *own* horizon frame every time, so the
+   * lighting is the same relative to the camera at every stop. Without that
+   * one azimuth means a different thing at each site and half the tour comes
+   * out backlit, which is not a property of the terrain.
+   */
+  const tourGo = (which?: number | string, altitude?: number, elevationDeg = 34, azimuthDeg = 130): string | string[] => {
+    if (which === undefined) {
+      return SITES.map((s, i) => `${String(i).padStart(2)}  ${s.key.padEnd(18)} ${s.name}`);
+    }
+    const i = typeof which === 'number'
+      ? ((which % SITES.length) + SITES.length) % SITES.length
+      : SITES.findIndex((s) => s.key === which);
+    const site = SITES[i];
+    if (!site) return `no such site: ${which}`;
+    tourAt = i;
+    const alt = altitude ?? ALTITUDES[1];
+    const g = RADIUS + heightAt(site.dir, terrain.octaves, terrain.heightScale);
+    controls.pos = [site.dir[0] * (g + alt), site.dir[1] * (g + alt), site.dir[2] * (g + alt)];
+    controls.groundFollow = alt <= 3;
+    // Look at the ground a little ahead rather than at the horizon or
+    // straight down: from 1.7 m that is the horizon anyway, and from
+    // 120 km it is the limb.
+    controls.pitch = -Math.min(1.1, 0.12 + 0.5 * Math.log10(1 + alt / 300));
+    controls.speedMul = 1;
+    sunFollow = true;
+    aimSun(elevationDeg, azimuthDeg);
+    exposure.snap(Math.sin((elevationDeg * Math.PI) / 180), site.ground, alt);
+    return `${i}  ${site.key} — ${site.name}, ${alt} m up, ground ${site.ground} m`;
+  };
 
   // Handle for driving the sim from the devtools console.
   Object.assign(window, {
@@ -413,6 +642,7 @@ async function main(): Promise<void> {
       selector,
       vegetation,
       sky,
+      clouds,
       shadows,
       aimSun,
       // Both vegetation and the sky are hidden for the audit. Crowns
@@ -422,16 +652,70 @@ async function main(): Promise<void> {
       audit: async () => {
         const wasVeg = vegetation.isEnabled;
         const wasSky = sky.mesh.visible;
+        const wasCloud = clouds.mesh.visible;
         vegetation.setEnabled(false);
         sky.mesh.visible = false;
+        clouds.mesh.visible = false;
         try {
           return await auditCracks(renderer, scene, camera);
         } finally {
           vegetation.setEnabled(wasVeg);
           sky.mesh.visible = wasSky;
+          clouds.mesh.visible = wasCloud;
         }
       },
       vegCounts: () => vegetation.readCounts(renderer),
+      tour: Object.assign(tourGo, {
+        next: (altitude?: number) => tourGo(tourAt + 1, altitude),
+        prev: (altitude?: number) => tourGo(tourAt - 1, altitude),
+        altitudes: ALTITUDES,
+      }),
+      /**
+       * The elevation the GPU drew at the centre of the view, against the
+       * elevation heightCPU says is there.
+       *
+       * The comparison has to be at the *same direction* on both sides, and the
+       * centre pixel is not the nadir — the pitch limit keeps the camera 2.9°
+       * off it, and if the camera is a kilometre up in the air that is fifty
+       * metres of ground. Fifty metres is several wavelengths of the finest
+       * octave, so comparing against `heightAt` at the nadir reads the
+       * amplification's own variance as divergence. So: take the drawn
+       * elevation, intersect the centre ray with the sphere of that radius,
+       * and evaluate the CPU at the direction that lands on.
+       *
+       * Vegetation and the sky are hidden for the same reason the crack audit
+       * hides them: either one can be the thing under the crosshair, and then
+       * the reading is of a leaf.
+       */
+      probeHeight: async () => {
+        const wasVeg = vegetation.isEnabled;
+        const wasSky = sky.mesh.visible;
+        const wasCloud = clouds.mesh.visible;
+        vegetation.setEnabled(false);
+        sky.mesh.visible = false;
+        clouds.mesh.visible = false;
+        try {
+          const gpu = await probeDrawnHeight(
+            renderer, scene, camera, (m) => terrain.setMode(m as ShadeMode), terrain.shadeMode,
+          );
+          const p = controls.pos;
+          const f = controls.forward;
+          const rho = RADIUS + gpu;
+          const b = p[0] * f[0] + p[1] * f[1] + p[2] * f[2];
+          const c = p[0] * p[0] + p[1] * p[1] + p[2] * p[2] - rho * rho;
+          const disc = b * b - c;
+          // No intersection means the centre ray missed the shell the drawn
+          // pixel sits on, which only happens if the readback is garbage.
+          const t = disc >= 0 ? -b - Math.sqrt(disc) : 0;
+          const dir = normalize([p[0] + f[0] * t, p[1] + f[1] * t, p[2] + f[2] * t]);
+          const cpu = heightAt(dir, terrain.octaves, terrain.heightScale);
+          return { gpu, cpu, delta: cpu - gpu, range: t, dir };
+        } finally {
+          vegetation.setEnabled(wasVeg);
+          sky.mesh.visible = wasSky;
+          clouds.mesh.visible = wasCloud;
+        }
+      },
     },
   });
 }

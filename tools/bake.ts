@@ -346,7 +346,7 @@ if (argv.includes('--write')) {
   // by half-texel offsets in terrain that has 2 km of relief per cell, so it
   // is large even when everything is correct; a mis-oriented face instead
   // compares unrelated parts of the planet and shows up in the mean.
-  const cube = toAtlas(grid, out.elevation, out.wetness);
+  const cube = toAtlas(grid, out.elevation, out.wetness, out.lakeDepth, out.channelDist);
 
   const roundTrip = (rotate: boolean): { mean: number; worst: number } => {
     let worst = 0;
@@ -392,7 +392,7 @@ if (argv.includes('--write')) {
         height: cube.height,
         pad: ATLAS_PAD,
         layout: '3x2 cube atlas, one-texel border per face',
-        channels: ['elevation_m', 'wetness_log10_area', 'unused', 'one'],
+        channels: ['elevation_m', 'wetness_log10_area', 'lake_depth_m', 'channel_dist_m'],
         format: 'rgba16float',
         solveRes: RES,
         seed: params.tectonics.seed,
