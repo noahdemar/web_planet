@@ -625,8 +625,13 @@ async function main(): Promise<void> {
     // 120 km it is the limb.
     controls.pitch = -Math.min(1.1, 0.12 + 0.5 * Math.log10(1 + alt / 300));
     controls.speedMul = 1;
+    // Through the module's own sun state, not by calling aimSun directly: the
+    // frame loop re-aims from sunEl/sunAz every frame while sunFollow is on, so
+    // a direct call is overwritten before it is ever drawn.
+    sunEl = elevationDeg;
+    sunAz = azimuthDeg;
     sunFollow = true;
-    aimSun(elevationDeg, azimuthDeg);
+    aimSun(sunEl, sunAz);
     exposure.snap(Math.sin((elevationDeg * Math.PI) / 180), site.ground, alt);
     return `${i}  ${site.key} — ${site.name}, ${alt} m up, ground ${site.ground} m`;
   };

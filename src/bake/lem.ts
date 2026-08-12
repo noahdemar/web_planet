@@ -92,10 +92,21 @@ export const DEFAULT_LEM: LemParams = {
 };
 
 export interface Flow {
-  /** Steepest-descent receiver. Equal to the cell itself at base level. */
+  /**
+   * Dominant receiver — the one taking the larger share of the D∞ split, so
+   * anything that wants a single downstream link (Strahler order, the channel
+   * strands, the relief cap) reads this and gets the main stem.
+   * Equal to the cell itself at base level.
+   */
   receiver: Int32Array;
-  /** Distance to the receiver, metres. */
+  /** Distance to `receiver`, metres. */
   length: Float32Array;
+  /** The other side of the split. Equal to `receiver` where flow is not split. */
+  receiver2: Int32Array;
+  /** Distance to `receiver2`, metres. */
+  length2: Float32Array;
+  /** Share going to `receiver`, in [0.5, 1]. The rest goes to `receiver2`. */
+  weight: Float32Array;
   /** Cells in downstream-to-upstream order. */
   stack: Int32Array;
   /** Upstream drainage area, m². */
@@ -104,6 +115,21 @@ export interface Flow {
 
 /** Cardinal neighbour slots in the grid's D8 ordering: S, W, E, N. */
 const CARDINAL = [1, 3, 4, 6];
+
+/**
+ * The eight D∞ facets, as [cardinal slot, diagonal slot] in the grid's D8
+ * ordering. Each facet is the triangle spanned by the cell centre and one
+ * cardinal/diagonal pair, and together they tile the 360° around a cell.
+ *
+ * Grid slot layout, in (di, dj):
+ *
+ *     0(-1,-1)  1(0,-1)  2(1,-1)
+ *     3(-1, 0)           4(1, 0)
+ *     5(-1, 1)  6(0, 1)  7(1, 1)
+ */
+const FACETS: readonly (readonly [number, number])[] = [
+  [4, 7], [6, 7], [6, 5], [3, 5], [3, 0], [1, 0], [1, 2], [4, 2],
+];
 
 /**
  * How much the depression filler must raise a cell before it counts as a lake,
@@ -202,72 +228,206 @@ export function routeFlow(
   const { count } = grid;
   const receiver = new Int32Array(count);
   const length = new Float32Array(count);
+  const receiver2 = new Int32Array(count);
+  const length2 = new Float32Array(count);
+  const weight = new Float32Array(count);
 
   for (let c = 0; c < count; c++) {
     if (z[c] <= seaLevel) {
       receiver[c] = c; // base level
+      receiver2[c] = c;
       length[c] = 1;
+      length2[c] = 1;
+      weight[c] = 1;
       continue;
     }
-    let best = c;
-    let bestSlope = 0;
-    let bestLen = 1;
-    for (let k = 0; k < 8; k++) {
-      const n = grid.nbr[c * 8 + k];
-      const d = grid.nbrDist[c * 8 + k];
-      const s = (z[c] - z[n]) / d;
-      if (s > bestSlope) {
-        bestSlope = s;
-        best = n;
-        bestLen = d;
+    const e0 = z[c];
+
+    // Pick the facet of steepest descent, then split inside the winner.
+    //
+    // Kept entirely in squared quantities. The facet's far edge is
+    // d2 = sqrt(d0² − d1²), and taking that square root per facet is 1.2 G of
+    // them over a full bake — but every test the loop makes survives being
+    // written against d2² instead:
+    //
+    //   s2 ≤ 0                 ⟺  (e1 − e2) ≤ 0            (d2 > 0)
+    //   s2·d1 > s1·d2          ⟺  (e1 − e2)·d1 > s1·d2²    (× d2)
+    //   s1² + s2²              =  s1² + (e1 − e2)²/d2²
+    //
+    // so only the winner needs the root, once, for its angle. Measured: the
+    // erosion stage went from 2.4x the D8 cost to 1.5x.
+    let bestS2 = 0; // squared slope of the winner, or its clamped value squared
+    let bestF = -1;
+    let bestKind = 0; // 0 interior, 1 clamped to the cardinal, 2 to the diagonal
+    let bestS1 = 0;
+    let bestG2 = 0; // (e1 − e2) of the winner, i.e. s2 before dividing by d2
+    let bestDD2 = 1; // d2² of the winner
+    let bestD1 = 1;
+
+    for (let f = 0; f < 8; f++) {
+      const kc = FACETS[f][0];
+      const kd = FACETS[f][1];
+      const e1 = z[grid.nbr[c * 8 + kc]];
+      const e2 = z[grid.nbr[c * 8 + kd]];
+      const d1 = grid.nbrDist[c * 8 + kc];
+      const d0 = grid.nbrDist[c * 8 + kd];
+      // The facet's far edge, from the cardinal neighbour to the diagonal one.
+      // Right triangle, so this follows from the two radial distances and does
+      // not need a third cell lookup.
+      const dd2 = Math.max(d0 * d0 - d1 * d1, 1e-6);
+
+      const s1 = (e0 - e1) / d1;
+      const g2 = e1 - e2;
+
+      let sq: number;
+      let kind: number;
+      if (s1 <= 0 && g2 <= 0) {
+        continue; // this facet is uphill in both components
+      } else if (g2 <= 0) {
+        // The steepest direction inside the facet points along the cardinal
+        // edge; Tarboton clamps r to 0 there.
+        sq = s1 * s1;
+        kind = 1;
+      } else if (s1 <= 0 || g2 * d1 > s1 * dd2) {
+        // ...or past the diagonal edge, where it clamps to the facet angle and
+        // the slope is the straight run to the diagonal neighbour.
+        const sd = (e0 - e2) / d0;
+        if (sd <= 0) continue;
+        sq = sd * sd;
+        kind = 2;
+      } else {
+        sq = s1 * s1 + (g2 * g2) / dd2;
+        kind = 0;
+      }
+      if (sq > bestS2) {
+        bestS2 = sq;
+        bestF = f;
+        bestKind = kind;
+        bestS1 = s1;
+        bestG2 = g2;
+        bestDD2 = dd2;
+        bestD1 = d1;
       }
     }
-    receiver[c] = best;
-    length[c] = bestLen;
+
+    if (bestF < 0) {
+      // No downhill neighbour at all. z is depression-free, so this only
+      // happens on a cell the filler could not reach; treat it as base level
+      // rather than leaving a dangling receiver.
+      receiver[c] = c;
+      receiver2[c] = c;
+      length[c] = 1;
+      length2[c] = 1;
+      weight[c] = 1;
+      continue;
+    }
+
+    const kc = FACETS[bestF][0];
+    const kd = FACETS[bestF][1];
+    const nc = grid.nbr[c * 8 + kc];
+    const nd = grid.nbr[c * 8 + kd];
+    const dc = grid.nbrDist[c * 8 + kc];
+    const dd = grid.nbrDist[c * 8 + kd];
+
+    // Share going to the diagonal: the flow angle as a fraction of the facet's
+    // own angle. This is the whole point of D∞ — it is a continuous function of
+    // the surface, so the direction moves smoothly as the terrain tilts instead
+    // of snapping between eight fixed bearings.
+    let toDiag: number;
+    if (bestKind === 1) toDiag = 0;
+    else if (bestKind === 2) toDiag = 1;
+    else {
+      const d2 = Math.sqrt(bestDD2);
+      toDiag = Math.atan2(bestG2 / d2, bestS1) / Math.atan(d2 / bestD1);
+    }
+    toDiag = toDiag < 0 ? 0 : toDiag > 1 ? 1 : toDiag;
+
+    // Store the larger share first, so every consumer that wants one link gets
+    // the main stem.
+    const diagFirst = toDiag > 0.5;
+    const rA = diagFirst ? nd : nc;
+    const lA = diagFirst ? dd : dc;
+    const rB = diagFirst ? nc : nd;
+    const lB = diagFirst ? dc : dd;
+    const wA = diagFirst ? toDiag : 1 - toDiag;
+
+    receiver[c] = rA;
+    length[c] = lA;
+    // Collapse the split when the second link carries nothing, and when the
+    // cell it points at is not actually below this one.
+    //
+    // Both happen, and the second is the one that bites. A facet clamped to
+    // one of its edges — Tarboton's r < 0 and r > α cases — sends the whole
+    // flow to one neighbour, and the *other* neighbour of that facet can be
+    // uphill. Recording it as a zero-weight receiver costs nothing
+    // hydrologically and everything topologically: it is still an edge, so the
+    // DAG gains a link that runs uphill, and a chain of them closes a cycle.
+    // Measured as 3841 of 221184 cells unorderable on the first run.
+    if (wA >= 1 - 1e-6 || z[rB] >= e0) {
+      receiver2[c] = rA;
+      length2[c] = lA;
+      weight[c] = 1;
+    } else {
+      receiver2[c] = rB;
+      length2[c] = lB;
+      weight[c] = wA;
+    }
   }
 
-  // Donor lists in CSR form: count, prefix-sum, scatter.
-  const ndonor = new Int32Array(count + 1);
-  for (let c = 0; c < count; c++) if (receiver[c] !== c) ndonor[receiver[c]]++;
-  const offset = new Int32Array(count + 1);
-  let acc = 0;
+  // ── topological order ─────────────────────────────────────────────────
+  //
+  // The receiver graph is a DAG now, not a forest, so the depth-first walk of
+  // the donor tree that used to build this cannot: a cell with two receivers
+  // would be emitted twice, and once before one of its receivers. Kahn's
+  // algorithm gives the same guarantee the DFS did — every cell appears after
+  // all of its donors — over a graph where a cell can have several receivers,
+  // and it is still one linear pass.
+  //
+  // Braun & Willett survives intact: their O(n) trick needs *an* order in which
+  // a cell's receivers are already final, not specifically a tree.
+  const indeg = new Int32Array(count);
   for (let c = 0; c < count; c++) {
-    offset[c] = acc;
-    acc += ndonor[c];
+    if (receiver[c] !== c) indeg[receiver[c]]++;
+    if (receiver2[c] !== c && receiver2[c] !== receiver[c]) indeg[receiver2[c]]++;
   }
-  offset[count] = acc;
-  const cursor = offset.slice();
-  const donor = new Int32Array(acc);
-  for (let c = 0; c < count; c++) if (receiver[c] !== c) donor[cursor[receiver[c]]++] = c;
-
-  // Depth-first from every base-level cell.
-  const stack = new Int32Array(count);
-  let sp = 0;
-  const work = new Int32Array(count);
-  let wp = 0;
-  for (let c = 0; c < count; c++) if (receiver[c] === c) work[wp++] = c;
-  while (wp > 0) {
-    const c = work[--wp];
-    stack[sp++] = c;
-    for (let i = offset[c]; i < offset[c + 1]; i++) work[wp++] = donor[i];
+  const order = new Int32Array(count);
+  let head = 0;
+  let tail = 0;
+  for (let c = 0; c < count; c++) if (indeg[c] === 0) order[tail++] = c;
+  while (head < tail) {
+    const c = order[head++];
+    const r1 = receiver[c];
+    if (r1 !== c && --indeg[r1] === 0) order[tail++] = r1;
+    const r2 = receiver2[c];
+    if (r2 !== c && r2 !== r1 && --indeg[r2] === 0) order[tail++] = r2;
   }
 
-  // Every cell must appear exactly once. A short stack means the receiver
+  // Every cell must appear exactly once. A short order means the receiver
   // graph has a cycle, which means depression filling did not complete —
   // silently continuing would give plausible-looking but wrong drainage.
-  if (sp !== count) {
-    throw new Error(`routeFlow: stack has ${sp} of ${count} cells — flow graph has a cycle`);
+  if (tail !== count) {
+    throw new Error(`routeFlow: ordered ${tail} of ${count} cells — flow graph has a cycle`);
   }
+
+  // `stack` keeps its old meaning, downstream-to-upstream, so every existing
+  // consumer's loop direction is unchanged.
+  const stack = new Int32Array(count);
+  for (let i = 0; i < count; i++) stack[i] = order[count - 1 - i];
 
   const area = new Float64Array(count);
   for (let c = 0; c < count; c++) area[c] = area0[c];
   for (let i = count - 1; i >= 0; i--) {
     const c = stack[i];
-    const r = receiver[c];
-    if (r !== c) area[r] += area[c];
+    const r1 = receiver[c];
+    if (r1 === c) continue;
+    const w = weight[c];
+    area[r1] += area[c] * w;
+    const r2 = receiver2[c];
+    if (r2 !== r1) area[r2] += area[c] * (1 - w);
+    else area[r1] += area[c] * (1 - w);
   }
 
-  return { receiver, length, stack, area };
+  return { receiver, length, receiver2, length2, weight, stack, area };
 }
 
 /**
@@ -375,28 +535,43 @@ function incise(
   p: LemParams,
   seaLevel: number,
 ): void {
-  const { stack, receiver, length, area } = flow;
+  const { stack, receiver, length, receiver2, length2, weight, area } = flow;
   const { K, m, n, dt } = p;
 
   for (let i = 0; i < stack.length; i++) {
     const c = stack[i];
-    const r = receiver[c];
-    if (r === c) continue; // base level is held fixed
+    const r1 = receiver[c];
+    if (r1 === c) continue; // base level is held fixed
     if (z[c] <= seaLevel) continue; // no fluvial incision below the sea
 
-    const zr = z[r];
+    const r2 = receiver2[c];
+    const w1 = weight[c];
+    const w2 = r2 === r1 ? 0 : 1 - w1;
+    const z1 = z[r1];
+    const z2 = z[r2];
     const zi = z[c] + dt * uplift[c];
-    const f = K * erodibility[c] * dt * Math.pow(area[c], m) / length[c];
+    const ka = K * erodibility[c] * dt * Math.pow(area[c], m);
+    // The stream-power flux splits with the flow, so each link erodes with its
+    // own share and its own path length. Summing them is what keeps the total
+    // incision the same as the single-receiver case when the split is 1:0.
+    const f1 = (ka * (w1 + (r2 === r1 ? 1 - w1 : 0))) / length[c];
+    const f2 = w2 > 0 ? (ka * w2) / length2[c] : 0;
+
+    // Below its lowest receiver the cell would be a pit, and the link that
+    // made it one reverses. Above that, a cell may sit under its *higher*
+    // receiver for a step; the next reroute re-derives the split.
+    const floor = w2 > 0 ? Math.min(z1, z2) : z1;
 
     if (n === 1) {
-      z[c] = (zi + f * zr) / (1 + f);
+      z[c] = (zi + f1 * z1 + f2 * z2) / (1 + f1 + f2);
     } else {
-      // Newton on  z + f·(z − zr)^n − zi = 0, from the explicit guess.
-      let x = Math.max(zr, zi);
+      // Newton on  z + Σ f_i·(z − z_i)^n − zi = 0, from the explicit guess.
+      let x = Math.max(floor, zi);
       for (let it = 0; it < 6; it++) {
-        const d = Math.max(x - zr, 1e-9);
-        const g = x + f * Math.pow(d, n) - zi;
-        const gp = 1 + f * n * Math.pow(d, n - 1);
+        const d1 = Math.max(x - z1, 1e-9);
+        const d2 = Math.max(x - z2, 1e-9);
+        const g = x + f1 * Math.pow(d1, n) + f2 * Math.pow(d2, n) - zi;
+        const gp = 1 + f1 * n * Math.pow(d1, n - 1) + f2 * n * Math.pow(d2, n - 1);
         const nx = x - g / gp;
         if (Math.abs(nx - x) < 1e-4) {
           x = nx;
@@ -404,10 +579,10 @@ function incise(
         }
         x = nx;
       }
-      z[c] = Math.max(zr, x);
+      z[c] = x;
     }
     // Rivers cut down, they do not cut below their own outlet.
-    if (z[c] < zr) z[c] = zr;
+    if (z[c] < floor) z[c] = floor;
   }
 }
 

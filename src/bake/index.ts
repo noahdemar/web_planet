@@ -17,14 +17,19 @@
 import { buildGrid, type Grid } from './grid.js';
 import { DEFAULT_TECTONICS, buildTectonics, type TectonicsParams } from './plates.js';
 import {
-  DEFAULT_CHANNELS,
   DEFAULT_LEM,
   accumulateMFD,
-  carveChannels,
   cellAreas,
   runLEM,
   type LemParams,
 } from './lem.js';
+import {
+  DEFAULT_CHANNELS,
+  cornerStats,
+  carveChannels,
+  channelDistance,
+  extractStrands,
+} from './channels.js';
 import { DEFAULT_RELIEF, addBaseRelief, type ReliefParams } from './relief.js';
 
 import { BAKE_RES } from '../planet.js';
@@ -68,6 +73,16 @@ export interface Baked {
   channelDist: Float32Array;
   /** Kept for diagnostics and for the runtime's coastline logic. */
   continental: Uint8Array;
+  /** Curves the channel network was resolved into — see channels.ts. */
+  strandCount: number;
+  strandVertices: number;
+  /**
+   * How angular the drainage network still is — see cornerStats. Total
+   * curvature per 100 km, and the share of it arriving in corners over 20°.
+   */
+  turnPer100km: number;
+  sharpShare: number;
+  medianSegment: number;
   timings: Record<string, number>;
 }
 
@@ -106,10 +121,21 @@ export function bake(params = DEFAULT_BAKE, onProgress?: Progress): Baked {
   const lakeDepth = new Float32Array(grid.count);
   for (let c = 0; c < grid.count; c++) lakeDepth[c] = Math.max(0, lem.water[c] - lem.z[c]);
 
-  // Then carve the network into the surface and measure the distance out from
-  // it. After the LEM, so it cuts the channel the model actually routed rather
-  // than one imposed on top of it.
-  const channelDist = carveChannels(grid, lem.z, mfd, DEFAULT_CHANNELS);
+  // Then lift the network off the lattice and carve *that*. After the LEM, so
+  // it cuts the channel the model actually routed rather than one imposed on
+  // top of it — but as a smooth curve through those cells rather than as the
+  // cells themselves, which is what stops a trunk river reading as a staircase
+  // of 45° segments from orbit. See channels.ts.
+  //
+  // On lem.flow, whose receivers are the dominant side of the D∞ split, so the
+  // strand a curve is fitted to is the main stem.
+  const strands = extractStrands(grid, lem.z, lem.flow, mfd, DEFAULT_CHANNELS);
+  const { dist: channelDist, nearArea } = channelDistance(
+    grid, lem.z, strands, DEFAULT_CHANNELS,
+  );
+  carveChannels(grid, lem.z, channelDist, nearArea, DEFAULT_CHANNELS);
+  const corners = cornerStats(strands);
+  const tChan = Date.now();
   const wetness = new Float32Array(grid.count);
   for (let c = 0; c < grid.count; c++) {
     // log area, not area: drainage spans ten orders of magnitude and every
@@ -126,10 +152,16 @@ export function bake(params = DEFAULT_BAKE, onProgress?: Progress): Baked {
     lakeDepth,
     channelDist,
     continental: tec.continental,
+    strandCount: strands.start.length - 1,
+    strandVertices: strands.start[strands.start.length - 1],
+    turnPer100km: corners.turnPer100km,
+    sharpShare: corners.sharpShare,
+    medianSegment: corners.medianSegment,
     timings: {
       grid: tGrid - t0,
       tectonics: tTec - tGrid,
       erosion: tLem - tTec,
+      channels: tChan - tLem,
       total: Date.now() - t0,
     },
   };

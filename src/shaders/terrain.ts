@@ -1594,19 +1594,45 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // rather than as the crawling grain that came of putting it at 2.5. It also
   // costs nothing at range, because past a few hundred metres it simply stops
   // resolving and the biome colour is all that is left — which is correct.
-  let gLam = max(mPerPx * 8.0, 0.30);
-  let gFrq = ${f(RADIUS)} / gLam;
-  let gA = noised_T(up * gFrq + vec3<f32>(21.7)).x;
-  let gB = noised_T(up * (gFrq * 0.28) + vec3<f32>(58.3)).x;
-  // Faded out once the band the pixel can carry is wider than ground texture
-  // physically is. Without this the grain is pinned to eight pixels *forever*:
-  // a uniform stipple over the whole field of view that never recedes, which
-  // is the opposite of what texture does and reads as noise rather than as
-  // distance. Soil, gravel and litter live between about 0.1 and 3 m; past
-  // that there is nothing left to see and the biome colour is the honest
-  // answer.
-  let gFade = 1.0 - smoothstep(2.0, 7.0, gLam);
-  let grain = (gA * 0.5 + gB * 0.5) * gFade;
+  // ── this band cannot come from a global function of a unit direction ──
+  //
+  // It used to. gLam was floored at 0.30 m, which put the frequency at 21.2 M
+  // against a MAX_NOISE_FREQ of 336 k — sixty-three times past it, where one
+  // f32 ULP spans two whole lattice cells. What reached the screen was
+  // therefore the lattice and not a field: hard-edged quads carpeting the near
+  // ground, several metres across, in the *albedo only*. That last part is why
+  // it survived so long — the normal was clean, the slope was clean and
+  // turning shadows off changed nothing, so every geometric explanation was
+  // wrong and the debug modes all looked fine except mode 5.
+  //
+  // The sibling ladder further down had already been floored at
+  // MIN_NOISE_LAMBDA for precisely this reason. This one was missed, and the
+  // local-lattice escape hatch that makes metre-scale detail reachable at all
+  // was sitting in the same function (see localNoiseBlock and LOCAL_PERIOD).
+  // So it is used here too, on the same fixed power-of-two rungs faded by
+  // pixel size — fixed rather than pixel-scaled because the wrap is only
+  // seamless when the period is a whole number of cells, and because a rung
+  // fading in beats a wavelength sliding around.
+  let pLocal = rel + snap;
+  var lg = 0.0;
+  var lgAmp = 1.0;
+  var lgNorm = 0.0;
+  var lgCells = 16384;
+  for (var i = 0; i < 3; i = i + 1) {
+    let lam = ${f(LOCAL_PERIOD)} / f32(lgCells);
+    let lw = 1.0 - smoothstep(lam * 0.5, lam * 2.0, mPerPx);
+    if (lw > 0.004) {
+      lg = lg + lw * lgAmp
+         * noiseL_T(pLocal / lam + vec3<f32>(f32(i * 37)), lgCells - 1);
+    }
+    lgNorm = lgNorm + lgAmp;
+    lgAmp = lgAmp * 0.55;
+    lgCells = lgCells / 4;
+  }
+  // Soil, gravel and litter live between about 0.1 and 3 m, and the rungs
+  // above already stop resolving past that, so the ladder carries its own
+  // distance fade and does not need a second one.
+  let grain = lg / lgNorm;
 
   // ── the middle scale ──────────────────────────────────────────────────
   //
@@ -1915,23 +1941,9 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // period over a power of two, so the cell mask is exact and the origin snap
   // leaves no seam; each fades once it falls under about two pixels, so the
   // ladder shortens with distance instead of stippling the horizon.
-  let pLocal = rel + snap;
-  var lg = 0.0;
-  var lgAmp = 1.0;
-  var lgNorm = 0.0;
-  var lgCells = 16384;
-  for (var i = 0; i < 3; i = i + 1) {
-    let lam = ${f(LOCAL_PERIOD)} / f32(lgCells);
-    let lw = 1.0 - smoothstep(lam * 0.5, lam * 2.0, mPerPx);
-    if (lw > 0.004) {
-      lg = lg + lw * lgAmp
-         * noiseL_T(pLocal / lam + vec3<f32>(f32(i * 37)), lgCells - 1);
-    }
-    lgNorm = lgNorm + lgAmp;
-    lgAmp = lgAmp * 0.55;
-    lgCells = lgCells / 4;
-  }
-  fg = fg + (lg / lgNorm) * 1.4;
+  // The same local ladder the grain is built from, hoisted above — one
+  // evaluation, two consumers, rather than two ladders over the same band.
+  fg = fg + grain * 1.4;
   fgNorm = fgNorm + 1.0;
   // Faded where a pixel is wider than the coarsest rung, so it recedes with
   // distance instead of stippling the whole landscape.
@@ -1940,7 +1952,9 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   alb = alb * (1.0 + fine * 0.30);
   alb = mix(alb, alb * vec3<f32>(0.82, 0.84, 0.88), clamp(fine, 0.0, 1.0) * 0.34);
 
-  alb = alb * (1.0 + grain * 0.13);
+  // No second multiplicative pass on the grain: it rides inside fine now.
+  // The hollow tint stays, because a damp shaded hollow is a hue shift and not
+  // the same effect as the tone mottle.
   alb = mix(alb, alb * vec3<f32>(0.74, 0.78, 0.80), hollow * 0.30);
 
   // The middle scale, applied as a shift along the *moisture* axis rather than

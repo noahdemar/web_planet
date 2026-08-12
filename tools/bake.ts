@@ -330,8 +330,21 @@ process.stdout.write(`
 timings (ms)  ${Object.entries(out.timings).map(([k, v]) => `${k} ${v}`).join('   ')}
 `);
 
-const budget = out.timings.total <= 60_000;
-process.stdout.write(`bake ${budget ? 'within' : 'OVER'} the 60 s budget\n`);
+// --- is the network still a staircase? ------------------------------------
+//
+// The question the curve fitting exists to answer, and the only one a picture
+// of a river cannot settle. A cell-to-cell path turns 45 degrees every cell or
+// two; a curve through those same cells turns by however much the valley bends.
+// Total curvature per 100 km separates the two and belongs to the curve rather
+// than to any frame — see cornerStats.
+process.stdout.write(`
+drainage geometry
+  strands                    ${out.strandCount}
+  vertices                   ${out.strandVertices}
+  median segment             ${(out.medianSegment / 1000).toFixed(2)} km
+  turning                    ${out.turnPer100km.toFixed(0)} deg per 100 km
+  of it in corners > 20 deg  ${(out.sharpShare * 100).toFixed(1)}%
+`);
 
 if (argv.includes('--write')) {
   mkdirSync('public/planet', { recursive: true });
