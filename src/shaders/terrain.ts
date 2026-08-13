@@ -61,6 +61,7 @@ import {
   COAST_WARP_F0,
   CLOUD_ALT,
   CLOUD_ZONAL,
+  DRAW_RIVERS,
   COAST_WARP_FADE,
   COAST_WARP_OCTAVES,
   CLUMP_MEDIAN,
@@ -267,7 +268,10 @@ fn channel_${s}(wet: f32, distAxis: f32) -> vec2<f32> {
                     ${f(CHANNEL_HALF_LO)}, ${f(CHANNEL_HALF_HI)});
   // The bowl is 2.5 half-widths across so the banks are inside it too.
   let m = 1.0 - smoothstep(0.0, halfW * 2.5, distAxis);
-  return vec2<f32>(${f(CHANNEL_DEPTH)} * on * m * m, on * m);
+  // Scaled by DRAW_RIVERS, so the trench and the corridor go together — see
+  // planet.ts. The mask is left alone: the water surface and the amplification
+  // damping still want to know where the drainage is.
+  return vec2<f32>(${f(CHANNEL_DEPTH * DRAW_RIVERS)} * on * m * m, on * m);
 }
 `;
 }
@@ -1524,7 +1528,8 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
 
   let corridor = (1.0 - smoothstep(0.30, 1.0, dAxis / ripW))
                * (ripHalf / ripW)
-               * smoothstep(${f(VALLEY_WET_LO)} - 1.6, ${f(VALLEY_WET_LO)} + 0.4, wetV);
+               * smoothstep(${f(VALLEY_WET_LO)} - 1.6, ${f(VALLEY_WET_LO)} + 0.4, wetV)
+               * ${f(DRAW_RIVERS)};
 
   let moistA = clamp(moist + aspect * 0.085 + corridor * 0.20, 0.0, 1.0);
   let cover = clamp(canopyClosure_T(temp, moistA, hgt, slope) * clim.z * cfg3.x,

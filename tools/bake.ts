@@ -29,6 +29,21 @@ const arg = (k: string, d: number): number => {
 const RES = arg('res', DEFAULT_BAKE.res);
 
 /**
+ * Which planet to build.
+ *
+ * Everything downstream is a deterministic function of this and the resolution:
+ * plate seeds and their motions come straight from it, and the erosion,
+ * drainage, climate and biomes are all consequences of the tectonics. So a new
+ * seed is a new world with the same physics, and the same seed is always the
+ * same world — which is what makes the realism baseline (npm run realism) and
+ * the site table in src/tour.ts meaningful at all. Both are tied to a seed and
+ * have to be reissued when it changes; the run prints the reminder.
+ *
+ *   npm run bake -- --seed 12345 --write
+ */
+const SEED = arg('seed', DEFAULT_BAKE.tectonics.seed);
+
+/**
  * CPU emulation of hardware cube-map sampling: pick the major axis, form the
  * face coordinates, read the nearest texel. Used only to verify the written
  * asset — if this disagrees with the solve grid, the faces are laid out wrong.
@@ -73,7 +88,11 @@ function sampleCube(cube: AtlasData, d: [number, number, number], rotate = false
   return DataUtils.fromHalfFloat(cube.data[((oy + j) * cube.width + ox + i) * 4]);
 }
 
-const params = { ...DEFAULT_BAKE, res: RES };
+const params = {
+  ...DEFAULT_BAKE,
+  res: RES,
+  tectonics: { ...DEFAULT_BAKE.tectonics, seed: SEED },
+};
 
 /**
  * Earth's hypsographic curve: fraction of total surface area in each
@@ -140,7 +159,7 @@ const EARTH = {
   }
 }
 
-process.stdout.write(`baking ${RES}²·6 = ${(6 * RES * RES / 1e6).toFixed(2)} M cells\n`);
+process.stdout.write(`baking ${RES}²·6 = ${(6 * RES * RES / 1e6).toFixed(2)} M cells, seed ${SEED}\n`);
 let lastStage = '';
 const out = bake(params, (stage, t) => {
   if (stage !== lastStage || t === 1) {
@@ -485,4 +504,13 @@ if (argv.includes('--write')) {
     ),
   );
   process.stdout.write(`wrote public/planet/surface.f16 — ${(bytes.length / 1e6).toFixed(1)} MB\n`);
+  if (SEED !== DEFAULT_BAKE.tectonics.seed) {
+    process.stdout.write(
+      `\n  This is a different planet from the one the checked-in baselines describe.\n` +
+        `  Reissue them before trusting npm run realism:\n` +
+        `    npx tsx tools/findSites.ts        (rewrites the site table in src/tour.ts)\n` +
+        `    npm run realism -- --update\n` +
+        `  and set DEFAULT_TECTONICS.seed in src/bake/plates.ts if you want to keep it.\n`,
+    );
+  }
 }

@@ -824,6 +824,30 @@ export const NIGHT_SKY = 0.020;
 export const CLOUD_ZONAL = 0.002;
 
 /**
+ * Draw the drainage network as a river at all.
+ *
+ * Off. The valleys stay — those are the LEM's, they are baked into the
+ * elevation, and they are the part of the drainage that reads well at every
+ * altitude. What this switches off is the *river*: the narrow trench the
+ * runtime cuts along the drainage axis (channel_) and the green gallery
+ * corridor drawn along it (see the river corridor block in shadeTerrain).
+ *
+ * Both are reconstructions of a feature the data cannot hold. LESSONS §3 is
+ * the long version: a continental trunk river is 1-3 km wide against a 9 km
+ * bake cell, so its position is known to about a cell and its width to nothing
+ * at all. The curve fitting in bake/channels.ts fixed the *shape* — the network
+ * is smooth now, and measurably so — but it cannot conjure resolution that was
+ * never there, and up close the result still reads as a painted line rather
+ * than as water.
+ *
+ * Kept as a switch rather than deleted because nothing about the machinery is
+ * wrong and the bake still produces the distance field either way. Set it back
+ * to 1 to see it. Removing a feature is a legitimate outcome (LESSONS §15) and
+ * this is the second time it has been the right call for rivers.
+ */
+export const DRAW_RIVERS = 0;
+
+/**
  * Cloud deck altitude, metres.
  *
  * One shell, not a volume. Real cloud is 3D and raymarching it is the single

@@ -3,22 +3,60 @@
 Planetary terrain, orbit to ground, fully procedural. TypeScript + three.js on
 WebGPU. Architecture and roadmap live in [SPEC.md](SPEC.md).
 
-**Status: M1 complete, plus the GPU-driven vegetation substrate.** Cube-sphere
-quadtree, CDLOD, camera-relative precision, a placeholder analytic height
-field, and a fully GPU-driven forest — scatter, LOD binning and draw counts all
-on the GPU, no per-instance CPU work. No streaming and no bake yet; those are
-M2/M3.
+**Status.** Cube-sphere quadtree with CDLOD and camera-relative precision; a
+global bake solving plate tectonics, stream-power erosion and drainage over 6.29
+M cells; runtime amplification whose spectrum varies by biome; climate, biomes,
+a cloud deck with ground shadows, GPU-driven forest and grass. Rivers are
+carried as curves in the bake but not drawn — see LESSONS §22.
+
+## Running it
 
 ```bash
 npm install
-npm run dev        # http://localhost:5173
+npm run bake -- --write   # REQUIRED first: builds the planet. ~7 min at 1024
+npm run dev               # http://localhost:5173
+```
+
+**The bake is not in the repository.** It is a 48 MB binary that is a pure
+function of the seed and the resolution, so versioning it would be storing
+something reproducible in a second. Without it the app starts and tells you to
+run the line above.
+
+In a hurry, or just want to see it move:
+
+```bash
+npm run bake -- --res 512 --write   # 4x coarser cells, ~40 s
+```
+
+Everything downstream adapts — `AMP_F0` and the octave ceiling are derived from
+the bake resolution, so a coarser bake is a valid planet and not a broken one.
+
+Needs WebGPU (Chrome/Edge 113+, Safari 18+). WebGL2 is not a fallback: the bake
+and the vegetation scatter both need compute shaders.
+
+### A different planet
+
+```bash
+npm run bake -- --seed 12345 --write
+npm run sites                        # reissue the site table in src/tour.ts
+npm run realism -- --update          # reissue the baseline for the new world
+```
+
+The seed drives the plate layout and their motions, and everything else —
+erosion, drainage, climate, biomes — follows from those, so a new seed is a new
+world under the same physics. The two reissue steps matter: the realism suite
+judges the planet at 24 fixed places chosen *for this seed*, and a site labelled
+`desert-flat` on one planet is somewhere else entirely on another. `npm run
+bake` prints the reminder when the seed is not the default. To keep a seed, set
+`DEFAULT_TECTONICS.seed` in [src/bake/plates.ts](src/bake/plates.ts).
+
+### Checks
+
+```bash
 npm run verify     # typecheck + shaders + precision + mirror + biomes + realism
 npm run realism    # the fast gate: 24 fixed sites vs a stored baseline, ~4 s
 npm run slopes     # slope distribution vs sampling scale
 ```
-
-Needs WebGPU (Chrome/Edge 113+, Safari 18+). WebGL2 is not a fallback — the
-bake pipeline at M3 requires compute shaders.
 
 ## Controls
 

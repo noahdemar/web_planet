@@ -138,6 +138,30 @@ Two artifacts visible from 573 km, both from the solver rather than the shader:
 **Rule:** any field that will be *looked at* needs its own treatment. The field
 the solver needs and the field the renderer draws are not the same object.
 
+**The general form of that rule is to leave the lattice entirely.** Both fixes
+above are patches applied while still on the grid. The drainage *network* is now
+lifted off it instead: the receiver tree is decomposed into main-stem strands,
+each strand is corner-cut into a smooth curve, and the distance field is
+measured to the curve. A spline through a D8 path is not a D8 path, so the
+angularity is gone by construction rather than by threshold — **98% of turning
+in corners over 20° → 0.1%**, with total curvature unchanged, because
+corner-cutting redistributes bend rather than removing it. The cells still
+supply the topology, which is the part the global solve got right and no local
+function could recover.
+
+D∞ routing in the erosion is a separate and complementary change, and it is
+worth being clear that it does *not* fix the drawn angularity: it makes the
+*share* of flow between neighbours continuous, which is what the stream-power
+solve wants, but the neighbours it splits between are still the same eight.
+
+One trap on the way. An exact distance to a curve does not quantise the way a
+Dijkstra over cell links does — a cell centre sits anywhere from 0 to half a
+cell off the curve — so a carve profile narrower than a cell flickered *along*
+the channel, left pits the LEM never filled, and the re-routed network
+collapsed: Strahler order 3 went from 167 segments to 9 and orders 4–5
+disappeared. The carve is floored at the cell size now, because what a 9 km grid
+can represent is the valley, not the channel (§3 again).
+
 ---
 
 ## 6. Every consumer of a shared field must apply every transform
@@ -371,6 +395,14 @@ tolerance that gets explained instead of met has stopped being a test.
   inside WGSL template literals silently truncate the shader and produce a 500.
   This has been self-inflicted at least five times. The checker catches it in a
   second; skipping it costs a browser round trip and a confused diagnosis.
+- **The static checks pay for themselves inside the session that writes them.**
+  The checker gained a WGSL reserved-word pass — the language reserves ~130
+  words that are not keywords and have no legal use, several of which are the
+  obvious name for something in a renderer. It caught a `ref` local within
+  minutes of being written, and the backtick half caught three more prose
+  backticks in the same afternoon, one of them in the comment explaining the
+  reserved-word rule. Nothing else in the toolchain reads WGSL before the GPU
+  does, and the GPU's answer is a blank screen.
 - **Bake iteration cost dominates everything.** 41 s at 512, 801 s at 1024 —
   and the 20× is not the 4× the cell count implies, because the LEM needs more
   iterations to converge at finer spacing. One careless Dijkstra that seeded
@@ -385,8 +417,200 @@ tolerance that gets explained instead of met has stopped being a test.
 
 ---
 
-## 16. Still open
+## 16. A guard is not a model
 
+`sunDepth_` integrates the optical depth toward the sun as `H·exp(-h/H)/mu`,
+and floors `mu` at 0.035 so the grazing case stays finite. The comment says the
+error is hidden by how little light arrives. That is true at the horizon and
+false everywhere past it: below the horizon the floor does not approximate a
+dim sun, it **invents** one, permanently 2° up, over the whole night side.
+
+Measured before touching it — the honest way to state the bug — the night
+hemisphere from orbit had **84.6% of the frame reading "bright" against the day
+side's 84.5%**. The dark side was rendering indistinguishably from the lit one,
+and it had been doing so since the atmosphere was written.
+
+The same shape of error, three times in one file:
+
+| guard | added for | became |
+|---|---|---|
+| `max(mu, 0.035)` | a finite integral at grazing incidence | a sun that never sets |
+| `0.045 +` on the sky ambient | shaded ground stays blue after sunset | skylight with no sun |
+| `0.10 +` on cloud lighting | a deck is lit from below, terminator is a gradient | a lit deck at midnight |
+
+Each is correct inside the range it was reasoned about and each was applied
+outside it. **A term added to keep an expression well-behaved is still a
+physical claim everywhere it evaluates.** The fix in every case was to gate it
+by the condition it silently assumed — here, that the sun is up — and the gate
+is worth deriving rather than guessing: the set point depends on altitude, so a
+cloud 8 km up keeps the sun 2.7° after the ground has lost it and a sky sample
+at 80 km keeps it for 9°.
+
+**Corollary — say when a number is a rendering choice.** Gating all three
+correctly makes the night side black, on the ground too, where auto-exposure
+opens to 4.0 and has nothing to open up for. The floor that fixes that is not
+starlight (10⁻⁷ of daylight) and not moonlight (10⁻⁶); it stands in for
+scotopic dark adaptation, which the tone curve cannot express. It is documented
+as that. A magic number with an honest name is maintainable; one dressed up as
+physics is not.
+
+---
+
+## 17. An approximation is only valid over the scale it was justified for
+
+Two bugs, one shape, and in both cases the original comment states the
+assumption plainly — then a later caller violates it.
+
+- **Aerial perspective sampled the sun transmittance at the path midpoint**,
+  "one evaluation instead of a march, which is plenty over the tens of
+  kilometres this ever covers". The same function shades the planet from orbit,
+  where the path is 9000 km and the midpoint sits 4500 km up — a point that has
+  the sun above its horizon at any phase short of the shadow cone. With the
+  clouds hidden the dark hemisphere came out a flat sky-blue disc, brighter than
+  the terminator. The air is not at the midpoint: density falls as `exp(-h/H)`,
+  so essentially all of it is within a scale height of the *lower* end.
+- **Shadow cascades were centred at `forward · radius · 0.65`**, near the
+  camera. Right at eye height, where the ground is two metres away; at 8 km the
+  ground is 8 km below and cascades 0 and 1 — 540 m and 2.6 km there — do not
+  reach it at all. The ground under the camera sat on the last cascade's
+  footprint edge and slid in and out of shadow. Measured over a 6–12 km sweep:
+  a drift of ~0.3 units per 250 m step, then a **jump of 3.71 at 8750 m**.
+
+**Rule:** when a helper's justification names a length scale, that scale is part
+of its signature. Grep the call sites before reusing it, and prefer a form that
+degrades correctly — sampling at the density-weighted end collapses back to the
+midpoint when the two ends are at the same altitude, so the short-path case is
+unchanged and the orbital case is fixed by the same line.
+
+---
+
+## 18. Fix the class, not the instance
+
+The near ground was carpeted in hard-edged quads several metres across. Not the
+shadows and not the mesh: the normal was clean, slope mode was clean, and
+turning shadows off changed nothing. Only shade mode 5 showed it, because it was
+in the albedo alone.
+
+The metre-scale grain read
+`noised_(up · RADIUS / max(mPerPx·8, 0.30))`, which at eye height is a frequency
+of 21.2 M against a `MAX_NOISE_FREQ` of 336 k — **sixty-three times past it**,
+where one f32 ULP spans two whole lattice cells. What reached the screen was the
+lattice, not a field.
+
+Twenty lines below, a sibling ladder carried this comment:
+
+> Floored by f32, not by ambition. This read 0.35 m, which is 54x past
+> MAX_NOISE_FREQ — under one step of fractional position per lattice cell, so
+> the "detail" was the hash aliasing against itself rather than a field.
+
+The identical bug had already been found, understood, written up, and fixed —
+in the same function — and the sibling was left alone. The local-lattice escape
+hatch that makes metre-scale detail reachable at all was also already there.
+
+The same pattern, benignly, in the atmosphere: eight separate sites composed
+`transmit_(sunDepth_(...))` by hand, so the missing occlusion had to be fixed
+eight times or not at all. It is one `sunLight_()` now.
+
+**Rule:** when a bug turns out to be an instance of a rule the codebase already
+knows (the f32 wall, the band limit, the Nyquist floor), the fix is not the
+instance. Grep for every other place the rule applies, and if the same
+expression is being composed by hand at N sites, make it one function first.
+
+---
+
+## 19. A discontinuity multiplied by time is a tear that grows
+
+The cloud deck's zonal wind was a translation of the noise domain,
+`t · rate · select(1, -1, lat < 0.35)` — easterlies one side of the boundary,
+westerlies the other. Two problems that are really one: a `select` is a
+discontinuity, and the offset accumulates, so the two bands slide apart
+*without bound*. Half an hour of sim time in, they were six planet-widths out of
+step and the boundary was a hard circle of latitude with unrelated weather
+either side.
+
+This class of bug is dangerous because **it starts invisible**. At t = 0 the
+tear is exactly zero and every screenshot taken shortly after a reload looks
+perfect. It only appears after the thing has been left running — which is the
+one thing a debugging session never does.
+
+Advection is a rotation about the axis now, which is continuous on a sphere by
+construction, cannot tear however long it runs, and is what a zonal wind
+physically is. The profile is smooth as well, so the reversal between the trades
+and the westerlies is a shear zone — where fronts actually form — rather than a
+cut.
+
+**Rule:** a hard switch on a smooth field is a known mistake (§13). A hard
+switch on a quantity that *accumulates* is worse, and needs a different test:
+run it for an hour, not a frame.
+
+---
+
+## 20. How you compute the number is part of the measurement
+
+§14 says to check the instrument. Two more, and both were instruments that
+looked fine and were measuring the wrong thing.
+
+- **Horton's bifurcation ratio read 10.96 against Earth's 3–5**, and had been
+  reported as OUT for as long as the bake existed. It was the *mean of the
+  consecutive ratios*, and on a whole planet the top Strahler order is always a
+  handful of segments: 4.57, 4.43, 6.61, and then 113/4 = **28.25**, which moved
+  the answer on its own. Fitted the way the ratios are actually defined — a
+  log-linear regression over orders with enough segments to estimate one — the
+  network reads **Rb 5.04 at R² 0.997**. Horton's law holds almost exactly. The
+  model was never outside Earth's range; the statistic was.
+- **The channel-angularity check measured the cube-sphere warp.** The first
+  version histogrammed segment *bearings* against the face axes, on the theory
+  that a lattice network can only run at multiples of 45°. It cannot: the
+  tangent warp makes cells non-square away from a face centre, so a diagonal
+  step is 43° here and 52° there. It read 39% where an unsmoothed network should
+  have read 100%. Total curvature per unit length has no such problem — it is a
+  property of the curve and not of any frame — and it separated the two cases
+  cleanly: **98% of turning in corners over 20°, against 0.1% after smoothing**,
+  with the total curvature unchanged.
+
+**Rule:** prefer a statistic that is a property of the object over one that is a
+property of the coordinates you happened to measure it in. And when a quantity
+is defined as the slope of a line, fit the line — do not average the steps, and
+report R² next to it, because a ratio quoted from points that are not on a line
+is not describing anything.
+
+---
+
+## 21. Normalise for what you are *not* changing
+
+The octave ladder gained a per-biome gain and hillslope crossover, so a dune
+field, a badland and an alpine ridge stop being the same shape at three sizes.
+The detail is `Σ wᵢaᵢ(rᵢ² − mean) / norm`, and the obvious normaliser is `Σaᵢ`,
+which is what was there.
+
+That would have made the biome table an *amplitude* control as well as a
+spectral one. The octaves are near-independent, so the RMS goes as
+`√(Σaᵢ²)/Σaᵢ`, which moves with the gain — measured across the candidate
+range, **−13% to +15%**, and in the wrong direction: the smoothest spectra would
+have delivered the *most* total relief. How much relief a place has is already
+the business of `ampAt_` and the bake's own slope, and two controls fighting
+over one quantity is how a fitted constant stops meaning anything.
+
+Normalising by `√(Σaᵢ²)`, rescaled to the reference ladder's own ratio, holds
+the RMS to **±0.6%** across the whole table and leaves the reference spectrum
+bit-identical to what `Σaᵢ` gave.
+
+**Rule:** when adding a per-point parameter to a normalised sum, work out which
+moments of the result it moves. Fix the ones you did not mean to change, and
+check the fix by measuring the moment rather than by looking at it.
+
+
+---
+
+## 22. Still open
+
+- **Rivers are hidden again.** `DRAW_RIVERS = 0`. The curve fitting fixed the
+  *shape* — the network is smooth and measurably so — but it cannot conjure
+  resolution that was never there, and a 1–3 km channel against a 9 km cell
+  still reads as a painted line up close rather than as water. The LEM's
+  valleys stay, and they are the part that reads well at every altitude. This
+  is the second time removing rivers has been the right call (§15); the
+  machinery is intact behind one constant.
 - The forest is dense enough that the ground is invisible wherever it grows —
   no glades, no gaps, cover saturating at `FOREST_DENSITY = 0.9`. This is
   unrealistic on its own *and* it blocks any verification of the grass.
@@ -405,3 +629,15 @@ tolerance that gets explained instead of met has stopped being a test.
 - Lakes come out at a fraction of Earth's 1.8% of land once thresholded deep
   enough to avoid the shallow-basin flood. The LEM simply does not leave many
   large closed basins.
+- **Auto-exposure does not know what is in frame.** It meters analytically from
+  the sun, the albedo under the camera and the altitude, which is what makes it
+  lag-free and reproducible (and worth keeping for that). But a bright overcast
+  sky filling half the view is not in the model, so a dark forest floor under it
+  comes out nearly black. The fix is not a framebuffer readback — that costs the
+  reproducibility the whole design is for — it is to include the sky's own
+  contribution to the frame in the analytic meter.
+- **Rb sits at 5.04, just above Earth's typical 3–5.** Measured honestly now
+  (§20), with R² 0.997, and the same estimator gives 5.09 on the pre-D∞ bake, so
+  it is the model's own value. Natural basins run 2–8, so this is not wrong —
+  but if it is ever worth moving, the lever is the channel-head support area,
+  which sets how many first-order streams the network is credited with.

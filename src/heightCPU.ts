@@ -25,6 +25,7 @@ import {
   BAND_FADE_HI,
   BAND_FADE_LO,
   CHANNEL_DEPTH,
+  DRAW_RIVERS,
   COAST_WARP_AMP,
   COAST_WARP_F0,
   COAST_WARP_FADE,
@@ -358,7 +359,10 @@ export function heightAt(
     Math.max(CHANNEL_HALF_LO, CHANNEL_WIDTH_K * Math.sqrt(10 ** wetness)),
   );
   const chM = chOn > 0 ? 1 - sstep(0, halfW * 2.5, distAxis) : 0;
-  const incision = CHANNEL_DEPTH * chOn * chM * chM;
+  // Scaled by DRAW_RIVERS exactly as channel_ is — this function is what the
+  // camera stands on, so a river the shader has stopped cutting must stop
+  // being cut here in the same breath.
+  const incision = CHANNEL_DEPTH * DRAW_RIVERS * chOn * chM * chM;
 
   const h0 = (bakeH - incision + ((mSum - mBias) / mNorm) * amp) * hscale;
 

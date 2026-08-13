@@ -18,7 +18,8 @@
     "slopes": "tsx tools/slopes.ts",
     "mirror": "tsx tools/mirror.ts",
     "biomes": "tsx tools/biomes.ts",
-    "realism": "tsx tools/realism.ts"
+    "realism": "tsx tools/realism.ts",
+    "sites": "tsx tools/findSites.ts"
   },
   "dependencies": {
     "three": "0.185.1"
