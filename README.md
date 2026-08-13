@@ -22,14 +22,18 @@ function of the seed and the resolution, so versioning it would be storing
 something reproducible in a second. Without it the app starts and tells you to
 run the line above.
 
-In a hurry, or just want to see it move:
+`--res N` bakes at a different resolution and is for iteration and for the
+drainage statistics — **not** for producing a runtime asset. `AMP_F0` and the
+octave ceiling are derived from `BAKE_RES` at *compile* time and nothing adapts
+to the file, so a 512 asset under a 1024 runtime starts amplifying at 12 km
+while the bake only resolves 18 km, double-counting every landform in between.
+Loading one throws rather than drawing it. To actually change the resolution,
+change `BAKE_RES` in [src/planet.ts](src/planet.ts) and re-bake — then the whole
+band moves with it.
 
 ```bash
-npm run bake -- --res 512 --write   # 4x coarser cells, ~40 s
+npm run bake -- --res 256    # fast, prints hypsometry and Horton's ratios
 ```
-
-Everything downstream adapts — `AMP_F0` and the octave ceiling are derived from
-the bake resolution, so a coarser bake is a valid planet and not a broken one.
 
 Needs WebGPU (Chrome/Edge 113+, Safari 18+). WebGL2 is not a fallback: the bake
 and the vegetation scatter both need compute shaders.
@@ -49,6 +53,21 @@ judges the planet at 24 fixed places chosen *for this seed*, and a site labelled
 `desert-flat` on one planet is somewhere else entirely on another. `npm run
 bake` prints the reminder when the seed is not the default. To keep a seed, set
 `DEFAULT_TECTONICS.seed` in [src/bake/plates.ts](src/bake/plates.ts).
+
+### Publishing to GitHub Pages
+
+`.github/workflows/pages.yml` bakes the planet in CI and publishes `dist`, so
+the 48 MB asset never has to be committed or uploaded. Push to `main`, then set
+**Settings → Pages → Source** to **GitHub Actions**. The bake is the long pole —
+budget 15–30 minutes for the first run.
+
+Two things worth knowing before you point anyone at the link:
+
+- **It needs WebGPU.** Chrome/Edge 113+ or Safari 18+. Firefox will show the
+  "Could not start" panel, which is the app telling the truth rather than a
+  broken deploy.
+- **Every visitor downloads the 48 MB bake.** Pages' bandwidth allowance is a
+  soft 100 GB/month, so that is roughly 2000 visits.
 
 ### Checks
 

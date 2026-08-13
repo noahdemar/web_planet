@@ -1,0 +1,79 @@
+# Build the planet and publish it to GitHub Pages.
+#
+# The bake is not in the repository — it is a 48 MB binary and a pure function
+# of the seed and the resolution, so CI regenerates it rather than anyone
+# committing it. That also keeps the 100 MB file limit and the 25 MB web-upload
+# limit out of the picture entirely.
+#
+# The bake is the long pole: ~7 minutes on a fast laptop, expect 15-30 on a
+# hosted runner, single-threaded. Everything else is seconds.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege that still lets deploy-pages mint its token.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; let a newer push win rather than queue behind a
+# 20-minute bake that is already stale.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The checks are cheap and they run against the *baked* planet below, so
+      # they go after it — but the typecheck and the shader scan need nothing
+      # and catch the most common breakage first.
+      - run: npx tsc --noEmit
+      - run: npm run check:shaders
+
+      - name: Bake the planet
+        # 6 GB heap: the 1024 grid alone is ~500 MB of neighbour tables and the
+        # solver keeps several full-resolution fields alive at once.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: npm run bake -- --write
+
+      - name: Check the planet is the one the baselines describe
+        run: npm run realism
+
+      - name: Build
+        env:
+          # Project site: https://<user>.github.io/<repo>/ — so the base has to
+          # be /<repo>/. Derived from the repository so a fork or a rename
+          # needs no edit here.
+          BASE_PATH: /${{ github.event.repository.name }}/
+        run: npx vite build
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

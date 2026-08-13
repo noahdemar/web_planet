@@ -27,6 +27,7 @@ import {
   RGBAFormat,
 } from 'three';
 import { ATLAS_COLS, ATLAS_PAD } from './bake/cubemap.js';
+import { BAKE_RES } from './planet.js';
 
 export interface PlanetSurface {
   /** Texels per face edge, excluding the border. */
@@ -59,6 +60,25 @@ export function surfaceFromBuffer(meta: Meta, buf: ArrayBuffer): PlanetSurface {
   if (buf.byteLength !== expect) {
     throw new Error(`surface.f16 is ${buf.byteLength} bytes, expected ${expect}`);
   }
+  // The runtime's amplification band is derived from BAKE_RES at compile time —
+  // AMP_F0 sits just under the bake's Nyquist, and DEFAULT_OCTAVES follows from
+  // that (planet.ts). Nothing here adapts to the asset. So an asset solved at a
+  // different resolution is not a coarser planet, it is a wrong one: bake at
+  // 512 against a runtime expecting 1024 and the amplification starts at 12 km
+  // while the bake only resolves 18 km, double-counting every landform in
+  // between.
+  //
+  // `npm run bake -- --res N` exists for iteration and for the drainage
+  // statistics, not for producing a runtime asset. To actually change the
+  // resolution, change BAKE_RES and re-bake — then this check passes and the
+  // whole band moves with it.
+  if (meta.solveRes !== BAKE_RES) {
+    throw new Error(
+      `surface.f16 was solved at ${meta.solveRes} but BAKE_RES is ${BAKE_RES}. ` +
+        'Either re-bake with `npm run bake -- --write`, or set BAKE_RES in ' +
+        'src/planet.ts to match and re-bake.',
+    );
+  }
   const data = new Uint16Array(buf);
 
   const texture = new DataTexture(data, meta.width, meta.height, RGBAFormat, HalfFloatType);
@@ -84,11 +104,17 @@ export function surfaceFromBuffer(meta: Meta, buf: ArrayBuffer): PlanetSurface {
 }
 
 export async function loadPlanetSurface(base = 'planet'): Promise<PlanetSurface> {
-  const meta: Meta = await fetch(`${base}/meta.json`).then((r) => {
+  // Vite's deploy base — '/' in dev, '/<repo>/' on a GitHub Pages project site.
+  // A bare relative fetch would resolve against the *page* URL instead, which
+  // is the same thing right up until someone lands on the site without the
+  // trailing slash.
+  const root =
+    (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
+  const meta: Meta = await fetch(`${root}${base}/meta.json`).then((r) => {
     if (!r.ok) throw new Error(`${base}/meta.json missing — run: npm run bake -- --write`);
     return r.json();
   });
-  const buf = await fetch(`${base}/surface.f16`).then((r) => {
+  const buf = await fetch(`${root}${base}/surface.f16`).then((r) => {
     if (!r.ok) throw new Error(`${base}/surface.f16 missing — run: npm run bake -- --write`);
     return r.arrayBuffer();
   });
