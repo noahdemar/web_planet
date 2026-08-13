@@ -60,6 +60,8 @@ import {
   COAST_WARP_AMP,
   COAST_WARP_F0,
   CLOUD_ALT,
+  CLOUD_SHEAR_MAX,
+  CLOUD_SPIN,
   CLOUD_ZONAL,
   DRAW_RIVERS,
   COAST_WARP_FADE,
@@ -362,8 +364,13 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
   // which turns the reversal between the trades and the westerlies into a shear
   // zone — where fronts actually form — rather than a cut. Rotation about Y
   // leaves dir.y alone, so every latitude term above still means what it says.
+  // Rigid rotation plus a *bounded* differential — see CLOUD_SPIN and
+  // CLOUD_SHEAR_MAX. The rigid part may accumulate because it distorts nothing;
+  // the differential may not, because it is a shear.
   let band = mix(-1.0, 1.0, smoothstep(0.26, 0.48, lat));
-  let spin = t * band * ${f(CLOUD_ZONAL)};
+  let slip = ${f(CLOUD_SHEAR_MAX)}
+           * tanh(t * band * ${f(CLOUD_ZONAL)} / ${f(CLOUD_SHEAR_MAX)});
+  let spin = t * ${f(CLOUD_SPIN)} + slip;
   let cs = cos(spin);
   let sn = sin(spin);
   let sdir = vec3<f32>(dir.x * cs + dir.z * sn, dir.y, -dir.x * sn + dir.z * cs);

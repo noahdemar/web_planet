@@ -1,12 +1,11 @@
 # Build the planet and publish it to GitHub Pages.
 #
-# The bake is not in the repository — it is a 48 MB binary and a pure function
-# of the seed and the resolution, so CI regenerates it rather than anyone
-# committing it. That also keeps the 100 MB file limit and the 25 MB web-upload
-# limit out of the picture entirely.
-#
-# The bake is the long pole: ~7 minutes on a fast laptop, expect 15-30 on a
-# hosted runner, single-threaded. Everything else is seconds.
+# The planet is solved in the browser now, so this is no longer load-bearing —
+# a deploy with no asset at all still works, it just costs each first-time
+# visitor a minute of CPU instead of a 12.7 MB download. It is kept because
+# baking the *default* seed here is 45 s and saves them that minute, and because
+# `npm run realism` below is a real gate: it refuses to publish a planet the
+# checked-in baselines do not describe.
 name: Pages
 
 on:
@@ -45,9 +44,7 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run check:shaders
 
-      - name: Bake the planet
-        # 6 GB heap: the 1024 grid alone is ~500 MB of neighbour tables and the
-        # solver keeps several full-resolution fields alive at once.
+      - name: Bake the reference planet
         env:
           NODE_OPTIONS: --max-old-space-size=6144
         run: npm run bake -- --write

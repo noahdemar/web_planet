@@ -9,7 +9,7 @@
 import { ACESFilmicToneMapping, PerspectiveCamera, Scene, Vector3 } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { DEFAULT_LOD_FACTOR, MAX_LEVEL, RADIUS } from './planet.js';
-import { loadPlanetSurface } from './planetData.js';
+import { planetSurface, seedFromLocation } from './planetSource.js';
 import { AutoExposure } from './exposure.js';
 import { ALTITUDES, SITES } from './tour.js';
 import { heightAt, setPlanetSurface } from './heightCPU.js';
@@ -127,7 +127,35 @@ async function main(): Promise<void> {
   // The M3 bake. Everything the terrain draws sits on top of this, so it is
   // loaded before anything is built rather than streamed in — a planet whose
   // continents appear a second late is worse than a slightly longer start.
-  const surface = await loadPlanetSurface();
+  // The planet, from the cache, the shipped asset, or a bake in a worker —
+  // see planetSource.ts. The seed comes from ?seed=, so a different world is a
+  // URL rather than a rebuild.
+  const boot = document.getElementById('boot')!;
+  const bootBar = boot.querySelector('.bar i') as HTMLElement;
+  const bootStage = boot.querySelector('.stage') as HTMLElement;
+  const seed = seedFromLocation();
+  // Each stage reports 0..1 on its own, so the bar has to be told how much of
+  // the wall clock each one is worth or it fills and resets three times.
+  // Measured at 512: grid 0.2 s, tectonics 8 s, erosion 37 s, channels 0.4 s.
+  const SPAN: Record<string, [number, number]> = {
+    grid: [0, 0.01],
+    tectonics: [0.01, 0.19],
+    erosion: [0.19, 0.99],
+    done: [0.99, 1],
+  };
+  const LABEL: Record<string, string> = {
+    grid: 'building the sphere',
+    tectonics: 'drifting the plates',
+    erosion: 'eroding, and routing the water',
+    done: 'finishing',
+    cached: 'loading the planet you already have',
+    downloaded: 'loading the prebuilt planet',
+  };
+  const surface = await planetSurface(seed, (stage, t) => {
+    const [a, b] = SPAN[stage] ?? [0, 1];
+    bootBar.style.width = `${((a + (b - a) * t) * 100).toFixed(1)}%`;
+    bootStage.textContent = LABEL[stage] ?? stage;
+  });
 
   const selector = new PatchSelector(DEFAULT_LOD_FACTOR);
   selector.setPlanetSurface(surface);
@@ -307,6 +335,11 @@ async function main(): Promise<void> {
   let prev = performance.now();
   let smoothed = 16.7;
 
+  // The boot screen goes when there is something behind it, not when the data
+  // arrives: the first frame at level 0 still costs a moment of shader compile,
+  // and fading out onto a black canvas reads as a failure.
+  let firstFrame = true;
+
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dt = Math.min(0.1, (now - prev) / 1000);
@@ -446,6 +479,11 @@ async function main(): Promise<void> {
     shadowU.sync(shadows, sun);
 
     renderer.render(scene, camera);
+    if (firstFrame) {
+      firstFrame = false;
+      boot.classList.add('gone');
+      setTimeout(() => { boot.style.display = 'none'; }, 600);
+    }
 
     // Timestamps resolve a frame or two late; that is fine for a readout.
     void renderer.resolveTimestampsAsync().catch(() => {});

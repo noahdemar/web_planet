@@ -4,41 +4,48 @@ Planetary terrain, orbit to ground, fully procedural. TypeScript + three.js on
 WebGPU. Architecture and roadmap live in [SPEC.md](SPEC.md).
 
 **Status.** Cube-sphere quadtree with CDLOD and camera-relative precision; a
-global bake solving plate tectonics, stream-power erosion and drainage over 6.29
-M cells; runtime amplification whose spectrum varies by biome; climate, biomes,
-a cloud deck with ground shadows, GPU-driven forest and grass. Rivers are
-carried as curves in the bake but not drawn — see LESSONS §22.
+global bake solving plate tectonics, stream-power erosion and drainage over
+1.57 M cells — **in the browser**, on first visit, then cached; runtime
+amplification whose spectrum varies by biome; climate, biomes, a cloud deck with
+ground shadows, GPU-driven forest and grass. Rivers are carried as curves in the
+bake but not drawn — see LESSONS §22.
 
 ## Running it
 
 ```bash
 npm install
-npm run bake -- --write   # REQUIRED first: builds the planet. ~7 min at 1024
-npm run dev               # http://localhost:5173
+npm run dev        # http://localhost:5173
 ```
 
-**The bake is not in the repository.** It is a 48 MB binary that is a pure
-function of the seed and the resolution, so versioning it would be storing
-something reproducible in a second. Without it the app starts and tells you to
-run the line above.
+That is the whole of it. **The planet is solved in your browser** on first
+visit — plate tectonics, then stream-power erosion and drainage over the whole
+sphere — behind a progress screen, and kept in IndexedDB afterwards. About a
+minute, once per seed.
 
-`--res N` bakes at a different resolution and is for iteration and for the
-drainage statistics — **not** for producing a runtime asset. `AMP_F0` and the
-octave ceiling are derived from `BAKE_RES` at *compile* time and nothing adapts
-to the file, so a 512 asset under a 1024 runtime starts amplifying at 12 km
-while the bake only resolves 18 km, double-counting every landform in between.
-Loading one throws rather than drawing it. To actually change the resolution,
-change `BAKE_RES` in [src/planet.ts](src/planet.ts) and re-bake — then the whole
-band moves with it.
+`src/bake/` never had a Node dependency; only the CLI wrapper did. So the same
+solver runs in a Web Worker (`src/bake/worker.ts`), and the atlas goes straight
+into a texture without ever becoming a file.
+
+An offline bake still exists, and `public/planet/` is still checked for and used
+when it matches — it is how the *reference* planet the baselines describe is
+produced, and it saves first-time visitors the minute:
 
 ```bash
-npm run bake -- --res 256    # fast, prints hypsometry and Horton's ratios
+npm run bake -- --write   # 45 s at 512, writes public/planet/ (12.7 MB)
 ```
 
-Needs WebGPU (Chrome/Edge 113+, Safari 18+). WebGL2 is not a fallback: the bake
-and the vegetation scatter both need compute shaders.
-
 ### A different planet
+
+Add `?seed=` to the URL. Anything works — numbers are used directly, words are
+hashed — and the planet is built and kept the first time you ask for it:
+
+```
+http://localhost:5173/?seed=4242
+http://localhost:5173/?seed=hello
+```
+
+To move the *default* planet, which is the one the checked-in baselines
+describe, bake it offline and reissue them:
 
 ```bash
 npm run bake -- --seed 12345 --write
@@ -66,8 +73,9 @@ Two things worth knowing before you point anyone at the link:
 - **It needs WebGPU.** Chrome/Edge 113+ or Safari 18+. Firefox will show the
   "Could not start" panel, which is the app telling the truth rather than a
   broken deploy.
-- **Every visitor downloads the 48 MB bake.** Pages' bandwidth allowance is a
-  soft 100 GB/month, so that is roughly 2000 visits.
+- **First visit costs either a 12.7 MB download or a minute of CPU** — the
+  prebuilt planet if the seed is the default, a browser bake otherwise. Both are
+  cached afterwards.
 
 ### Checks
 

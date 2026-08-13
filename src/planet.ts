@@ -48,8 +48,18 @@ export const OCEAN_DEPTH = -5400; // basin floor where the land mask is zero
  * is derived from it, and DEFAULT_OCTAVES from that. Changing it and re-baking
  * moves the whole amplification band to match, with nothing else to touch.
  *
- *    512 → 1.57 M cells, 18 km spacing,  41 s to bake, 12.7 MB
- *   1024 → 6.29 M cells,  9 km spacing, 801 s to bake, 50.5 MB
+ *    256 → 0.39 M cells, 36 km spacing,   10 s to bake,  3.2 MB
+ *    512 → 1.57 M cells, 18 km spacing,   66 s to bake, 12.7 MB
+ *   1024 → 6.29 M cells,  9 km spacing,  433 s to bake, 50.5 MB
+ *
+ * 512 is the default because the bake runs *in the browser* now (see
+ * planetSource.ts), and a minute of arithmetic behind a progress bar is a
+ * first visit while seven minutes is not. The cost is real and measured: land
+ * median falls 833 m → 530 m against Earth's 797, because the coarser solve
+ * simply resolves less relief. Drainage structure is untouched — Horton's Rb
+ * is 5.07 at R² 1.000 against 5.04 at 1024 — so what is lost is height, not
+ * hydrology, and the amplification is zero-mean so it cannot give it back.
+ * Raising the uplift to recover it is a bakeSweep job and has not been done.
  *
  * The 20× is not the 4× you would expect from the cell count: the landscape
  * evolution model is 91% of the run and needs more iterations to converge at
@@ -58,7 +68,7 @@ export const OCEAN_DEPTH = -5400; // basin floor where the land mask is zero
  * that most of the *visible* globe-scale gain came free from MIN_SELECT_LEVEL
  * rather than from here.
  */
-export const BAKE_RES = 1024;
+export const BAKE_RES = 512;
 
 /** Deepest quadtree level. L19 ≈ 6.9 cm ground sample distance at 256²/tile. */
 export const MAX_LEVEL = 19;
@@ -283,14 +293,22 @@ export const AMP_RELIEF = 4000;
  * spreads `relief` across the land that actually exists — 13% saturates, which
  * is about the fraction of Earth's land that is mountainous.
  *
- * Refit when BAKE_RES changed: a finer bake resolves steeper gradients, so the
+ * Refit again at 512, by percentile rather than by eye. The 1024 window
+ * [0.0017, 0.0155] spanned p14 to p83 of the baked land-slope distribution; at
+ * 512 the same percentiles are [0.0015, 0.0111], because a coarser solve
+ * resolves gentler gradients — median 0.00378 against 0.00502. Holding the
+ * *percentiles* rather than the values is what keeps the same share of land in
+ * the ramp: 30% below relief 0.05 and 19% saturated, against 36% and 18% at
+ * 1024.
+ *
+ * Refit when BAKE_RES changes: a finer bake resolves steeper gradients, so the
  * whole distribution shifts. At 512 the land median was 0.0034 and the window
  * was [0.0012, 0.011]; at 1024 the median is 0.0048, and leaving the window
  * alone put 22% of land at full amplitude instead of 13% and took the rugged
  * median from 15° to 28°. Scaled by the same 1.41 the distribution moved.
  */
-export const RELIEF_SLOPE_LO = 0.0017;
-export const RELIEF_SLOPE_HI = 0.0155;
+export const RELIEF_SLOPE_LO = 0.0015;
+export const RELIEF_SLOPE_HI = 0.0111;
 
 /**
  * ── Standing water ───────────────────────────────────────────────────────
@@ -805,23 +823,41 @@ export const LAPSE = 0.000165;
 export const NIGHT_SKY = 0.020;
 
 /**
- * Differential zonal wind for the cloud deck, radians per second.
+ * Rigid rotation of the cloud deck, radians per second.
  *
- * The deck is advected by *rotating* the sample direction about the planet's
- * axis, at a rate that reverses between the trade-wind belt and the
- * mid-latitude westerlies. A rotation is continuous on a sphere and cannot
- * tear, which the thing it replaced could: that was a translation of the noise
- * domain whose sign flipped hard at |sin(lat)| = 0.35, and because the offset
- * grew with t, the two bands slid past each other without bound. Half an hour
- * in they were six planet-widths apart and the boundary was a hard circle of
- * latitude with unrelated weather on either side.
+ * The whole deck turns at this rate. A rigid rotation is an isometry — it can
+ * run forever without distorting anything — so this is the part that is allowed
+ * to accumulate.
+ */
+export const CLOUD_SPIN = 0.002;
+
+/**
+ * Differential zonal wind on top of that, radians per second, and the total
+ * slip it is allowed to accumulate.
  *
- * The rate matches what the translation gave at the synoptic frequency, so the
- * deck moves at the speed it always did. For reference, the physical figure is
- * about a third of this: a mid-latitude system crossing Earth at 15 m/s
- * circumnavigates in 31 days, which at this project's 240 s day is 8.4e-4.
+ * Bands have to move at different speeds or the deck reads as a painted ball.
+ * But a *differential* rotation is a shear, and shear accumulates: at 0.002
+ * rad/s the trades and the westerlies slip 40 radians apart in 10000 s, which
+ * is six and a half relative turns of the planet. Anything spanning the
+ * reversal is stretched by that factor, and the deck comes out as long zonal
+ * filaments — swirled paint, which is the failure the flow-warp strength was
+ * already tuned to avoid, arriving by a different route.
+ *
+ * Real bands do slip forever and real cloud does not smear, because cloud
+ * *regenerates*: a system lives days, not the age of the planet, so it only
+ * ever experiences a few days' worth of shear. Cross-fading two ages of the
+ * field would model that honestly and would double the cost of the eight
+ * billow octaves and everything that samples them, including the ground
+ * shadow.
+ *
+ * Capping the accumulated slip is the cheap stand-in and it buys the same
+ * thing: bands still slide apart at the right rate to begin with, then hold a
+ * fixed offset instead of winding up. 0.35 rad over the ~0.23 rad width of the
+ * reversal is a shear strain of 1.5, which draws a cell out to about 1.8:1 —
+ * a front, which is what that zone should look like, rather than a filament.
  */
 export const CLOUD_ZONAL = 0.002;
+export const CLOUD_SHEAR_MAX = 0.35;
 
 /**
  * Draw the drainage network as a river at all.

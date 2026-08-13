@@ -14,7 +14,6 @@
 
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { bake, DEFAULT_BAKE } from '../src/bake/index.ts';
-import { buildGrid } from '../src/bake/grid.ts';
 import { cellAreas, routeFlow } from '../src/bake/lem.ts';
 import { cellAt } from '../src/bake/grid.ts';
 import { toAtlas, ATLAS_COLS, ATLAS_PAD, type AtlasData } from '../src/bake/cubemap.ts';
@@ -169,7 +168,7 @@ const out = bake(params, (stage, t) => {
 });
 process.stdout.write('\n');
 
-const grid = buildGrid(RES);
+const grid = out.grid;
 const areas = cellAreas(grid);
 const z = out.elevation;
 const N = grid.count;

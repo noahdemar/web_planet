@@ -41,11 +41,42 @@
       }
       #err div { max-width: 60ch; white-space: pre-wrap; }
       #err b { color: #f0d0b8; display: block; margin-bottom: 10px; font-size: 15px; }
+
+      /* The planet is solved in the browser, and the solve is a minute of
+         arithmetic — so it gets a screen rather than a frozen tab. */
+      #boot {
+        position: fixed; inset: 0; z-index: 90; display: flex;
+        align-items: center; justify-content: center; flex-direction: column;
+        gap: 18px; background: #05070a; color: #cfe3d8;
+        font: 13px/1.7 ui-monospace, "SF Mono", Menlo, monospace;
+        transition: opacity 500ms ease; padding: 40px; text-align: center;
+      }
+      #boot.gone { opacity: 0; pointer-events: none; }
+      #boot h1 {
+        font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+        color: #6f9a86; font-weight: 600; margin: 0;
+      }
+      #boot .bar {
+        width: min(420px, 70vw); height: 2px; background: rgba(120,170,150,0.18);
+        border-radius: 2px; overflow: hidden;
+      }
+      #boot .bar i { display: block; height: 100%; width: 0;
+        background: #7fc9a0; transition: width 200ms linear; }
+      #boot .note { color: #5f7d70; max-width: 52ch; }
     </style>
   </head>
   <body>
     <div id="hud"></div>
     <div id="err"><div></div></div>
+    <div id="boot">
+      <h1>Forming the planet</h1>
+      <div class="bar"><i></i></div>
+      <div class="stage">starting</div>
+      <div class="note">
+        Plate tectonics, then erosion and drainage over the whole sphere. This
+        runs once per seed and is kept, so it only happens on a first visit.
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

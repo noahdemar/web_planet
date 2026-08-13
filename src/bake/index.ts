@@ -51,6 +51,12 @@ export const DEFAULT_BAKE: BakeParams = {
 
 export interface Baked {
   res: number;
+  /**
+   * The grid the solve ran on. Returned rather than rebuilt by the caller: at
+   * 1024 it is 1.2 s and 400 MB of neighbour tables, and both consumers — the
+   * atlas writer and the diagnostics — need exactly the one that was used.
+   */
+  grid: Grid;
   /** Metres relative to sea level, 6·res² in face-major order. */
   elevation: Float32Array;
   /** log₁₀(drainage area in m²), clamped to [0, 14]. */
@@ -147,6 +153,7 @@ export function bake(params = DEFAULT_BAKE, onProgress?: Progress): Baked {
 
   return {
     res: params.res,
+    grid,
     elevation: lem.z,
     wetness,
     lakeDepth,
