@@ -45,6 +45,7 @@ import {
   SEA_BAND,
   SEA_LEVEL,
 } from './planet.js';
+import { SHADOW_DEPTH_OFFSET } from './shadows.js';
 import type { PatchBuffers } from './quadtree.js';
 import type { PlanetSurface } from './planetData.js';
 import { ATLAS_PAD } from './bake/cubemap.js';
@@ -61,7 +62,9 @@ import {
   shadeTerrain,
 } from './shaders/terrain.js';
 
-export type ShadeMode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+/** 0 natural · 1 LOD · 2 slope · 3 normals · 4 cover · 5 albedo · 6 climate
+ *  · 7 elevation readback · 8 shadow factor. */
+export type ShadeMode = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 
 /** Returns a scalar node in [0,1]: the fraction of sun reaching a point. */
 export type ShadowFactor = (rel: unknown) => ReturnType<typeof float>;
@@ -464,7 +467,10 @@ export class TerrainMesh {
     // Linear distance along the light, written to an R32F target.
     const depthMat = new MeshBasicNodeMaterial();
     depthMat.positionNode = position;
-    depthMat.colorNode = asVec3(vec3(tslDot(relPos, this.shadowSun)));
+    // Offset so the payload is never negative — see SHADOW_DEPTH_OFFSET.
+    depthMat.colorNode = asVec3(
+      vec3(tslDot(relPos, this.shadowSun).add(float(SHADOW_DEPTH_OFFSET))),
+    );
     this.depthMaterial = depthMat;
 
     this.mesh = new Mesh(this.geometry, material);

@@ -1545,6 +1545,15 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   }
   let gridCol = vec3<f32>(1.0, 0.9, 0.3);
 
+  if (mode > 7.5) {
+    // The shadow factor on its own, which is the only way to tell a cast
+    // shadow from dark ground. Written after a camera-locked dark region was
+    // chased through the bias, the patch skirt and the cascade centring before
+    // anyone looked at the term itself — at which point it was flat zero over
+    // the whole near field, which no lighting explanation survives. See
+    // SHADOW_DEPTH_OFFSET.
+    return vec3<f32>(shadow, shadow, shadow);
+  }
   if (mode > 6.5) {
     // Absolute elevation, encoded for a pixel readback rather than for the eye.
     //
@@ -1561,7 +1570,7 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
     let v = clamp((hgt + 12000.0) / 24000.0, 0.0, 1.0);
     return vec3<f32>(floor(v * 255.0) / 255.0, fract(v * 255.0), 0.0);
   }
-  if (mode > 5.5) {
+  if (mode > 5.5 && mode < 6.5) {
     // Climate: red is warm, blue is wet. The view that shows whether the
     // planet has provinces at all, which is the thing the orbital view lives
     // or dies on.

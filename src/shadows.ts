@@ -64,6 +64,39 @@ NO_OCCLUDER.b = -1e9;
 /** How far the light frustum extends behind the receivers, to catch casters. */
 const CASTER_DEPTH = 4500;
 
+/**
+ * Added to every stored and compared distance so the payload is never negative.
+ *
+ * The map stores signed distance along the light, and roughly half of any scene
+ * is on the far side of the camera from the sun, so half the values are
+ * negative. They were not surviving the write: measured across a row of cascade
+ * 2, 1566 written texels came back with **min 0, not one negative, and 1206 of
+ * them exactly 0**, while positive values passed through untouched (max 4590).
+ * Something in three's WebGPU output path clamps at zero — it is not the clear
+ * (the sentinel reads back as -1e9 exactly) and it is not tone mapping
+ * (`toneMapped = false` changes nothing).
+ *
+ * The consequence is the same artefact LESSONS §8 records against the old
+ * 0xffffff clear, and for the same reason: a caster stores 0 where it should
+ * store a large negative, so `frag + bias >= stored` fails for every receiver
+ * with `dot(rel, sunDir) < -bias`. That set is a half-space, its boundary is a
+ * plane through the camera, and it draws a dark region that follows the camera
+ * across the landscape and covers the half of the world facing away from the
+ * sun. Fixing the clear removed one half of that bug in M3 and left this half.
+ *
+ * Rather than keep hunting the clamp, the payload is made unsigned. A float
+ * target carrying signed values through an output chain nobody controls is a
+ * fragile contract; a positive offset costs nothing and cannot be broken by it.
+ *
+ * The bound, so the offset is derived rather than picked: the largest cascade
+ * is `BASE_RADII[2] · (1 + SHADOW_MAX_ALTITUDE/900)` = 21.5 km, its centre sits
+ * at most `radius·0.65 + SHADOW_MAX_ALTITUDE` = 28 km from the camera, and the
+ * frustum reaches `CASTER_DEPTH + radius` = 26 km either side of that. So no
+ * point inside any cascade exceeds ~76 km, and 200 km leaves 2.6x of margin.
+ * f32 resolves 1.6 cm at that magnitude, against a minimum bias of 0.35 m.
+ */
+export const SHADOW_DEPTH_OFFSET = 200_000;
+
 export interface ShadowCaster {
   mesh: Mesh;
   /** Same positionNode as the display material, trivial fragment shader. */

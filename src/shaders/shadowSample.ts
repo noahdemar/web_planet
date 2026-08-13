@@ -13,7 +13,7 @@
 
 import { Matrix4, Vector3, Vector4 } from 'three';
 import { Fn, If, float, mix, smoothstep, step, texture, uniform, vec2, vec4 } from 'three/tsl';
-import { CASCADES, MAP_SIZE, type Shadows } from '../shadows.js';
+import { CASCADES, MAP_SIZE, SHADOW_DEPTH_OFFSET, type Shadows } from '../shadows.js';
 
 /**
  * The subset of the TSL node surface this file uses. Spelling it out is better
@@ -152,11 +152,16 @@ export function makeShadowFactor(u: ShadowUniforms, shadows: Shadows) {
     // bias has to cover that divergence as well as texel quantisation.
     const bias = n(texel.mul(3.0).add(0.35));
 
+    // The stored payload carries SHADOW_DEPTH_OFFSET, so the fragment has to
+    // as well — see the note on the constant. Adding it to both sides is a
+    // no-op mathematically and the whole point physically: it keeps every value
+    // that reaches the render target positive.
+    const frag0 = n(frag.add(float(SHADOW_DEPTH_OFFSET)));
     let sum = n(float(0));
     for (const [dx, dy] of TAPS) {
       const s = n(n(maps[i]).sample(n(uv.add(nVec2(dx / MAP_SIZE, dy / MAP_SIZE)))));
       // Lit where the nearest-to-sun surface recorded there is not in front.
-      sum = n(sum.add(nStep(n(s.r), n(frag.add(bias)))));
+      sum = n(sum.add(nStep(n(s.r), n(frag0.add(bias)))));
     }
     return n(sum.mul(1 / TAPS.length));
   }

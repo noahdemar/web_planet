@@ -30,6 +30,7 @@ import {
   Vector4,
 } from 'three';
 import type { ComputeNode, WebGPURenderer } from 'three/webgpu';
+import { SHADOW_DEPTH_OFFSET } from './shadows.js';
 import {
   IndirectStorageBufferAttribute,
   MeshBasicNodeMaterial,
@@ -417,7 +418,10 @@ export class Vegetation {
       // Depth pass: same vertex path, distance along the light as the payload.
       const depthMat = new MeshBasicNodeMaterial();
       depthMat.positionNode = mat.positionNode;
-      depthMat.colorNode = asVec3(vec3(tslDot(inst.xyz, this.shadowSun)));
+      // Offset so the payload is never negative — see SHADOW_DEPTH_OFFSET.
+      depthMat.colorNode = asVec3(
+        vec3(tslDot(inst.xyz, this.shadowSun).add(float(SHADOW_DEPTH_OFFSET))),
+      );
       depthMat.side = isTree ? FrontSide : DoubleSide;
       this.depthMaterials.push(depthMat);
 

@@ -214,6 +214,35 @@ so it was patched in place rather than paid for with another 19-minute bake.
   half-space, whose boundary is a plane, which is why the artifact was a hard
   straight-edged wedge covering half the world. R32F holds a real sentinel;
   `−1e9` costs nothing.
+
+  **That fix was half the bug, and the write-up above hid the other half for two
+  milestones.** The same artefact came back — a dark region following the camera
+  at every altitude under 10 km — and the clear was not to blame this time: read
+  back, the sentinel is exactly `−1e9` where nothing drew. What is wrong is the
+  *written* texels. Across one row of the far cascade: 1566 written, **minimum
+  0, not one negative, 1206 of them exactly 0**, while positives pass through
+  untouched (max 4590). Something in three's WebGPU output path clamps at zero —
+  not tone mapping, which changes nothing when disabled. Half of any scene is on
+  the far side of the camera from the sun, so half the map stored 0 instead of a
+  large negative, and `frag + bias >= stored` failed over a half-space bounded
+  by a plane through the camera. The same shape, from the other end of the same
+  comparison.
+
+  The payload is unsigned now: both sides add `SHADOW_DEPTH_OFFSET`, derived
+  from the largest distance any point inside a cascade can reach. **A float
+  render target carrying signed values through an output chain you do not
+  control is a contract you cannot enforce** — and the debugging cost of a
+  quantity that is silently half-destroyed is enormous, because every hypothesis
+  about lighting, bias, geometry and cascade selection stays alive.
+
+  Three probes died before the fourth found it: a 2000 m bias (unchanged), the
+  patch skirt removed (unchanged), the cascade centring reverted (unchanged).
+  All three were guesses at a mechanism. What settled it in one step was
+  rendering the shadow factor on its own — it was flat zero over the entire near
+  field, which no lighting explanation survives — and then reading the texels
+  back. §2 says to add a debug mode early rather than as a last resort; this is
+  the fourth time that has been the cheapest move available and the third time
+  it was not taken first. `ShadeMode 8` now returns the shadow factor.
 - **Band selection nested three deep by hand.** Now built from `VEG_BANDS`, so
   adding a band is one line instead of a nested `select` nobody notices is
   still three deep.
