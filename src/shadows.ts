@@ -133,10 +133,27 @@ export class Shadows {
       const radius = BASE_RADII[i] * grow;
       this.radii[i] = radius;
 
-      // Centre the cascade ahead of the camera rather than on it: almost the
-      // whole frustum slice is in front, so centring on the camera would waste
-      // half the map behind it.
-      this.tmpCentre.copy(forward).multiplyScalar(radius * 0.65);
+      // Centre the cascade on the *ground*, led forward.
+      //
+      // This used to be `forward * radius * 0.65` alone, which centres the box
+      // near the camera. That is right at eye height, where the ground is a
+      // couple of metres away, and wrong the moment there is any altitude: at
+      // 8 km the ground under the camera is 8 km below, so cascades 0 and 1 —
+      // 540 m and 2.6 km at that height — do not reach it at all, and cascade 2
+      // only just does. The ground under the camera then sat on cascade 2's
+      // footprint edge, where `coverOf` is part-way through its shoulder, so it
+      // slid in and out of shadow as the camera turned. That is the pop.
+      //
+      // Dropping the centre to the surface first fixes it at every altitude and
+      // changes nothing at eye level, where the drop is 1.7 m. The lead uses
+      // the *horizontal* part of forward so that looking straight down centres
+      // the box under the camera instead of pushing it out to one side.
+      this.tmpCentre
+        .copy(forward)
+        .addScaledVector(localUp, -forward.dot(localUp));
+      const lead = this.tmpCentre.length();
+      if (lead > 1e-4) this.tmpCentre.multiplyScalar((radius * 0.65) / lead);
+      this.tmpCentre.addScaledVector(localUp, -altitude);
 
       const cam = this.cams[i];
       const texel = (2 * radius) / MAP_SIZE;

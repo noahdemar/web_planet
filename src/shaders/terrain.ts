@@ -60,6 +60,7 @@ import {
   COAST_WARP_AMP,
   COAST_WARP_F0,
   CLOUD_ALT,
+  CLOUD_ZONAL,
   COAST_WARP_FADE,
   COAST_WARP_OCTAVES,
   CLUMP_MEDIAN,
@@ -70,6 +71,7 @@ import {
   LAKE_ON_HI,
   LAKE_ON_LO,
   LAPSE,
+  NIGHT_SKY,
   LAT_EXP,
   RELIEF_GAIN,
   RELIEF_LACUNARITY,
@@ -336,11 +338,36 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
   let storm   = exp(-(((lat - 0.74) / 0.17) * ((lat - 0.74) / 0.17)));
   let bias = 0.26 * itcz - 0.32 * dryBelt + 0.22 * storm;
 
+  // ── advection ─────────────────────────────────────────────────────────
+  //
   // Wind runs east in the mid latitudes and west in the tropics, as it does on
   // Earth. One drift direction for the whole planet made the deck rotate like
-  // a painted ball.
-  let zonal = select(1.0, -1.0, lat < 0.35);
-  let drift0 = vec3<f32>(t * 0.0042 * zonal, 0.0, t * 0.0011);
+  // a painted ball — but the fix for that tore the deck in half.
+  //
+  // It was a *translation* of the noise domain, t * rate * select(1, -1, lat
+  // < 0.35). Two things wrong and they compound: a select is a discontinuity,
+  // and the offset grows with t, so the tear widens for as long as the sim
+  // runs. Half an hour in, the tropics and the mid latitudes were six
+  // planet-widths out of step and the boundary was a hard circle of latitude —
+  // unmissable from over a pole, where it draws a ring with unrelated weather
+  // inside and outside it.
+  //
+  // Rotating the sample direction about the axis instead is continuous on the
+  // sphere by construction, so there is nothing to tear however long it runs,
+  // and it is what a zonal wind physically is. The profile is smooth as well,
+  // which turns the reversal between the trades and the westerlies into a shear
+  // zone — where fronts actually form — rather than a cut. Rotation about Y
+  // leaves dir.y alone, so every latitude term above still means what it says.
+  let band = mix(-1.0, 1.0, smoothstep(0.26, 0.48, lat));
+  let spin = t * band * ${f(CLOUD_ZONAL)};
+  let cs = cos(spin);
+  let sn = sin(spin);
+  let sdir = vec3<f32>(dir.x * cs + dir.z * sn, dir.y, -dir.x * sn + dir.z * cs);
+
+  // Systems also have to change shape, not merely slide. A *uniform* offset is
+  // safe where a latitude-dependent one is not: every point moves the same way,
+  // so the field translates rigidly and there is no seam to open.
+  let drift0 = vec3<f32>(0.0, t * 0.0011, 0.0);
 
   // ── synoptic scale ────────────────────────────────────────────────────
   //
@@ -357,16 +384,16 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
   // is what shears the cells into spiral arms and drawn-out fronts. This is
   // the same reason real cloud organises — it is advected by a rotational
   // field — arrived at by the cheapest route rather than by solving for it.
-  let syn = noised_${s}(dir * 2.1 + drift0 * 0.35);
-  let sg = syn.yzw - dir * dot(dir, syn.yzw);
-  let curl = cross(dir, sg);
+  let syn = noised_${s}(sdir * 2.1 + drift0 * 0.35);
+  let sg = syn.yzw - sdir * dot(sdir, syn.yzw);
+  let curl = cross(sdir, sg);
   // Second, finer swirl so the arms have arms.
-  let syn2 = noised_${s}(dir * 5.3 + drift0 * 0.6 + vec3<f32>(37.1));
-  let sg2 = syn2.yzw - dir * dot(dir, syn2.yzw);
+  let syn2 = noised_${s}(sdir * 5.3 + drift0 * 0.6 + vec3<f32>(37.1));
+  let sg2 = syn2.yzw - sdir * dot(sdir, syn2.yzw);
   // Enough to organise, not so much that the cells stretch into marbling. At
   // 0.16 the whole planet came out as swirled paint: the arms were longer than
   // the cells they were made of, so there was no cloud left, only filament.
-  let flow = normalize(dir + curl * 0.085 + cross(dir, sg2) * 0.028 + sg * 0.015);
+  let flow = normalize(sdir + curl * 0.085 + cross(sdir, sg2) * 0.028 + sg * 0.015);
   // Strong: this is what makes big clear subtropics and big cloudy storm
   // tracks instead of an even sprinkle.
   // Strong, because the clear air matters as much as the cloud. Half the Blue
@@ -1705,7 +1732,7 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
     let dd = nh * nh * (a2 - 1.0) + 1.0;
     let ggx = a2 / (3.14159265 * dd * dd);
 
-    let sunTrW = transmit_T(sunDepth_T(wp, sd, Rg));
+    let sunTrW = sunLight_T(wp, sd, Rg);
     let sunUpW = max(dot(up, sd), 0.0);
 
     // Only the transmitted fraction reaches the water body. Shallow water over
@@ -1715,7 +1742,12 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
     // reads as ocean, from the same expression.
     let dt = clamp(depth / 45.0, 0.0, 1.0);
     let body = mix(vec3<f32>(0.075, 0.175, 0.165), vec3<f32>(0.004, 0.019, 0.042), dt);
-    let skyAmb = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.045 + 0.6 * sunUpW);
+    // Gated with the sky it comes from — see the dusk note in the ground
+    // ambient below. Water is the term that mattered most here: its albedo is
+    // low but it reflects a whole hemisphere of sky, so an ungated floor made
+    // every ocean on the night side glow.
+    let skyAmb = sunCol * vec3<f32>(0.055, 0.085, 0.155)
+               * (${f(NIGHT_SKY)} + 0.045 * sunUp_T(wp, sd, Rg) + 0.6 * sunUpW);
     let sub = body * (sunCol * sunTrW * sunUpW * (1.0 / 3.14159265) * shadow * cloudLit + skyAmb);
 
     // Fresnel is capped with the same distance term. Grazing incidence sends it
@@ -1986,7 +2018,7 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
 
   // ── lighting ──────────────────────────────────────────────────────────
   let ndl = max(dot(n2, sd), 0.0);
-  let sunTr = transmit_T(sunDepth_T(wp, sd, Rg));
+  let sunTr = sunLight_T(wp, sd, Rg);
   // Soft terminator: unresolved relief keeps scattering light just past the
   // geometric horizon, and a hard cut there reads as a CG edge.
   let soft = smoothstep(-0.10, 0.12, dot(n2, sd));
@@ -1995,7 +2027,15 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   let direct = alb * (1.0 / 3.14159265) * sunCol * sunTr * ndl * soft * shadow * cloudLit;
 
   let sunUp = max(dot(up, sd), 0.0);
-  let sky = sunCol * vec3<f32>(0.055, 0.085, 0.155) * (0.045 + 0.6 * sunUp);
+  // The 0.045 is skylight from air the sun has *set* on — the blue that keeps
+  // a shaded wall visible after the sun leaves it — so it has to end when the
+  // sun does. Held constant it lit the whole night hemisphere, and that was
+  // the last of what made the dark side read as day once the exposure and the
+  // cloud deck were fixed. sunUp_T is the same twilight geometry the
+  // atmosphere uses, so the ground and the air it sits under go out together.
+  let dusk = sunUp_T(wp, sd, Rg);
+  let sky = sunCol * vec3<f32>(0.055, 0.085, 0.155)
+          * (${f(NIGHT_SKY)} + 0.045 * dusk + 0.6 * sunUp);
   let ambient = alb * sky * (0.5 + 0.5 * dot(n2, up)) * skyView.x;
 
   // One crude bounce off the surrounding lit ground, deliberately *not*

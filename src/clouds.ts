@@ -101,7 +101,7 @@ fn cloudShade(dirIn: vec3<f32>, camPos: vec3<f32>, sunDir: vec3<f32>,
   let wp = dir * (Rg + ${CLOUD_ALT}.0);
   let sunEl = dot(dir, sd);
   let ndl = max(sunEl, 0.0);
-  let sunTr = transmit_C(sunDepth_C(wp, sd, Rg));
+  let sunTr = sunLight_C(wp, sd, Rg);
 
   // Is there any sun on this piece of deck at all?
   //

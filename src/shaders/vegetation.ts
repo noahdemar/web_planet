@@ -510,7 +510,7 @@ fn shadeVegetation(inst: vec4<f32>, uv: vec2<f32>, camPos: vec3<f32>,
   let ao = mix(0.22, 1.0, smoothstep(0.0, 0.8, uv.y));
   let form = mix(0.55, 1.0, 1.0 - abs(uv.x - 0.5) * 1.6);
 
-  let sunTr = transmit_A(sunDepth_A(wp, sd, Rg));
+  let sunTr = sunLight_A(wp, sd, Rg);
   let sunUp = max(dot(up, sd), 0.0);
   // Foliage is a thin scatterer: some light comes through the leaf as well as
   // off it, which is why canopies glow slightly against the sun.
@@ -569,7 +569,7 @@ fn shadeTree(inst: vec4<f32>, nrm: vec3<f32>, kind: f32, uu: f32,
   let canopyAO = mix(0.35, 1.0, smoothstep(0.0, 0.7, uu));
   let ao = mix(canopyAO, mix(0.55, 0.85, uu), kind);
 
-  let sunTr = transmit_T2(sunDepth_T2(wp, sd, Rg));
+  let sunTr = sunLight_T2(wp, sd, Rg);
   let sunUp = max(dot(up, sd), 0.0);
   let ndl = max(dot(n, sd), 0.0);
   // Foliage transmits as well as reflects, which is why a canopy glows when

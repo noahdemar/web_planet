@@ -80,6 +80,43 @@ fn transmit_${s}(od: vec2<f32>) -> vec3<f32> {
 }
 
 /**
+ * Is the sun above this point's own horizon?
+ *
+ * The slab integral above has no idea the planet is in the way. Its floor on
+ * mu is there to keep the grazing case finite, and the note says the error is
+ * hidden by how little light arrives — which is true right at the horizon and
+ * false everywhere past it. Below the horizon the clamp does not approximate a
+ * dim sun, it invents one: a point on the night side was lit as though the sun
+ * were permanently 2° up, so the whole unlit hemisphere kept scattering, and
+ * that is what was left once the exposure and the cloud deck were fixed.
+ *
+ * The set point is geometric and depends on altitude — a cell 8 km up sees the
+ * sun 2.7° after the ground below it has lost it, and a sky sample at 80 km
+ * for 9° — so it is derived per point rather than fixed. The width either side
+ * is twilight: the sun is half a degree wide and the air keeps scattering for
+ * a few degrees past geometric sunset, which is exactly the gradient that
+ * makes a terminator read as a terminator.
+ */
+fn sunUp_${s}(p: vec3<f32>, sd: vec3<f32>, Rg: f32) -> f32 {
+  let r = max(length(p), Rg);
+  let k = Rg / r;
+  let cosSet = -sqrt(max(1.0 - k * k, 0.0));
+  return smoothstep(cosSet - 0.09, cosSet + 0.02, dot(p / r, sd));
+}
+
+/**
+ * Sunlight arriving at a point: the air it came through, and nothing at all
+ * where the planet is between the point and the sun.
+ *
+ * Every consumer wants this pair together, so it is one call — the two were
+ * previously composed at eight separate sites and the occlusion was missing
+ * from all of them.
+ */
+fn sunLight_${s}(p: vec3<f32>, sd: vec3<f32>, Rg: f32) -> vec3<f32> {
+  return transmit_${s}(sunDepth_${s}(p, sd, Rg)) * sunUp_${s}(p, sd, Rg);
+}
+
+/**
  * Exact optical depth for a path whose altitude varies linearly from h0 to h1
  * over distance d. Valid for the surface rays aerial perspective deals with;
  * a long sky ray is not linear in altitude, which is why the sky raymarches.
@@ -115,10 +152,28 @@ fn aerial_${s}(colour: vec3<f32>, camP: vec3<f32>, surfP: vec3<f32>,
   let tr = exp(-ext);
 
   let c = dot(rd, sd);
-  // Sun transmittance sampled at the path midpoint — one evaluation instead of
-  // a march, which is plenty over the tens of kilometres this ever covers.
-  let mid = camP + seg * 0.5;
-  let sunTr = transmit_${s}(sunDepth_${s}(mid, sd, Rg));
+  // Sun transmittance sampled where the scattering actually happens, which is
+  // not the midpoint.
+  //
+  // One evaluation instead of a march is right, and the midpoint was a fine
+  // place to take it over "the tens of kilometres this ever covers" — but this
+  // is also what shades the planet from orbit, where the path is nine thousand
+  // kilometres. The midpoint is then 4500 km up, and a point that far out has
+  // the sun above its horizon at every phase short of the shadow cone, so the
+  // whole night side went on inscattering: with the clouds hidden the dark
+  // hemisphere came out a flat sky-blue disc, brighter than the terminator.
+  //
+  // The air is not at the midpoint. Density falls as exp(-h/H), so essentially
+  // all of it lies within a scale height of the *lower* end of the path — which
+  // is where the sun has actually set. Sampling there fixes the orbital case
+  // and collapses back to the midpoint for short paths, where the two ends are
+  // at much the same altitude and the old choice was already correct.
+  let lowIsCam = h0 < h1;
+  let lowP = select(surfP, camP, lowIsCam);
+  let hiP = select(camP, surfP, lowIsCam);
+  let dh = abs(h1 - h0);
+  let along = select(0.5, clamp(H_R_${s} / max(dh, 1.0), 0.0, 0.5), dh > 1.0);
+  let sunTr = sunLight_${s}(lowP + (hiP - lowP) * along, sd, Rg);
 
   let scat = BETA_R_${s} * (odR * phaseR_${s}(c))
            + vec3<f32>(BETA_M_${s} * odM * phaseM_${s}(c, 0.76));
@@ -161,7 +216,7 @@ fn skyRadiance_${s}(camP: vec3<f32>, rd: vec3<f32>, sd: vec3<f32>,
 
     // View transmittance to here, times sun transmittance down to here.
     let tView = transmit_${s}(vec2<f32>(odR, odM));
-    let tSun = transmit_${s}(sunDepth_${s}(p, sd, Rg));
+    let tSun = sunLight_${s}(p, sd, Rg);
     sumR = sumR + tView * tSun * dR;
     sumM = sumM + tView * tSun * dM;
   }

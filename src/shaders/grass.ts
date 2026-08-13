@@ -306,7 +306,7 @@ fn shadeGrass(inst: vec4<f32>, nrm: vec3<f32>, tt: f32, camPos: vec3<f32>,
   let wrapped = clamp((ndl + 0.45) / 1.45, 0.0, 1.0);
   let trans = pow(clamp(-ndl, 0.0, 1.0), 1.6) * 0.55;
 
-  let sunTr = transmit_S(sunDepth_S(wp, sd, Rg));
+  let sunTr = sunLight_S(wp, sd, Rg);
   var col = alb * (1.0 / 3.14159265) * sunCol * sunTr * (wrapped * shadow + trans * shadow);
 
   // Sky, and self-shadowing down the blade — the base of a sward sees almost

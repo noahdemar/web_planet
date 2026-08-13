@@ -781,6 +781,49 @@ export const LAT_EXP = 0.6;
 export const LAPSE = 0.000165;
 
 /**
+ * Sky radiance on the night side, as a fraction of the daytime sky term.
+ *
+ * Not physics, and it should not pretend to be. A moonless night sky is about
+ * 10⁻⁷ of a sunlit surface; rendered honestly at that ratio the night side is
+ * a black screen at any exposure, which is what happened the moment the sky
+ * ambient was correctly gated to the sun. Nor is it moonlight — full moonlight
+ * is ~10⁻⁶ of sunlight and would be just as invisible.
+ *
+ * What it stands in for is the dark adaptation the eye does and the renderer
+ * cannot: scotopic vision compresses six orders of magnitude into something a
+ * person describes as "dim", so a moonlit field looks perhaps a hundredth as
+ * bright as noon rather than a millionth. This is that compression, applied as
+ * a floor because the tone curve has no other way to express it.
+ *
+ * Measured, at 0.020: the ground under a sun 12° below the horizon reads 8-bit
+ * 30/44/35 at the ground-level night exposure of 4.0 — legible, unmistakably
+ * night, and enough to walk by. From orbit, where the exposure ceiling is 0.6,
+ * the night hemisphere reads black over the whole disc with only the limb
+ * showing. That second number is the one that matters: this floor is what the
+ * dark side used to blow out from, and it now costs nothing there.
+ */
+export const NIGHT_SKY = 0.020;
+
+/**
+ * Differential zonal wind for the cloud deck, radians per second.
+ *
+ * The deck is advected by *rotating* the sample direction about the planet's
+ * axis, at a rate that reverses between the trade-wind belt and the
+ * mid-latitude westerlies. A rotation is continuous on a sphere and cannot
+ * tear, which the thing it replaced could: that was a translation of the noise
+ * domain whose sign flipped hard at |sin(lat)| = 0.35, and because the offset
+ * grew with t, the two bands slid past each other without bound. Half an hour
+ * in they were six planet-widths apart and the boundary was a hard circle of
+ * latitude with unrelated weather on either side.
+ *
+ * The rate matches what the translation gave at the synoptic frequency, so the
+ * deck moves at the speed it always did. For reference, the physical figure is
+ * about a third of this: a mid-latitude system crossing Earth at 15 m/s
+ * circumnavigates in 31 days, which at this project's 240 s day is 8.4e-4.
+ */
+export const CLOUD_ZONAL = 0.002;
+
+/**
  * Cloud deck altitude, metres.
  *
  * One shell, not a volume. Real cloud is 3D and raymarching it is the single

@@ -115,9 +115,20 @@ const EARTH = {
   median: -3360,
   /** Channels per kilometre of basin, humid temperate. Field range 0.5–5. */
   drainageDensity: [0.5, 5],
-  /** Horton bifurcation ratio. Field range 3–5. */
+  /**
+   * Horton's ratios, *typical* values — not hard bounds, which is a
+   * distinction this file used to get wrong by calling them the field range.
+   * Horton (1945) and Strahler (1957) put most natural basins at Rb 3–5 and
+   * Rl 1.5–3.5, but real basins run Rb 2–8: strong structural control makes a
+   * network elongated and pushes it high, and nothing about a value of 5.1 says
+   * a drainage network is wrong.
+   *
+   * So the band is reported with slack, and the number to read alongside it is
+   * R². These ratios are the slope of a straight line through log-counts; a
+   * ratio quoted from points that do not lie on a line is not measuring
+   * Horton's law at all, and that is the failure this check exists to catch.
+   */
   bifurcation: [3, 5],
-  /** Horton length ratio. Field range 1.5–3.5. */
   lengthRatio: [1.5, 3.5],
 };
 
@@ -197,8 +208,20 @@ const q = (a: number[], p: number) => (a.length ? a[Math.floor(p * (a.length - 1
 
 const m = (v: number) => `${v >= 0 ? ' ' : ''}${v.toFixed(0).padStart(6)} m`;
 const pc = (v: number) => `${(v * 100).toFixed(1).padStart(5)}%`;
-const rng = (v: number, [lo, hi]: number[]) =>
-  `${v.toFixed(2).padStart(6)}   ${lo}–${hi}   ${v >= lo && v <= hi ? 'ok' : 'OUT'}`;
+/**
+ * A value against a typical band, with slack.
+ *
+ * Ten per cent, because the band is a rule of thumb rather than a tolerance —
+ * flagging OUT at 5.07 against 3–5 says nothing about the planet and only
+ * trains the reader to ignore the line.
+ */
+const SLACK = 0.1;
+const rng = (v: number, [lo, hi]: number[]) => {
+  const inside = v >= lo && v <= hi;
+  const near = v >= lo * (1 - SLACK) && v <= hi * (1 + SLACK);
+  const tag = inside ? 'ok' : near ? (v > hi ? 'high' : 'low') : 'OUT';
+  return `${v.toFixed(2).padStart(6)}   ${lo}–${hi}   ${tag.padEnd(4)}`;
+};
 
 // Full-curve comparison. L1 over the bands is the single number to minimise:
 // it is the fraction of the planet's surface that sits in the wrong elevation
@@ -295,23 +318,68 @@ for (let c = 0; c < N; c++) if (isChannel[c]) chanLen += flow.length[c];
 const density = chanLen / 1000 / (landArea / 1e6); // km of channel per km²
 
 const orders = [...nSeg.keys()].sort((a, b) => a - b);
-let bifSum = 0;
-let bifN = 0;
-let lenRatioSum = 0;
-let lenRatioN = 0;
-process.stdout.write('drainage network\n  order   segments   mean length\n');
+
+/**
+ * Fewest segments an order needs before its count is worth fitting to.
+ *
+ * The relative standard error of a count goes as 1/sqrt(N), so an order with
+ * four segments carries a 50% error and an order with a hundred carries ten.
+ * The old estimator averaged the consecutive ratios with no such filter, and
+ * on a whole planet the top Strahler order is always a handful of segments —
+ * there are only so many continent-sized basins. At 1024 that meant averaging
+ * 4.57, 4.43, 6.61 and 113/4 = 28.25, and the last of those, computed from
+ * four segments, moved the reported ratio from 4.9 to 10.96 on its own. The
+ * model was never outside Earth's range; the statistic was.
+ */
+const MIN_SEGMENTS = 30;
+
+/**
+ * Horton's ratios by log-linear regression, which is how they are defined.
+ *
+ * Horton's laws say the counts fall geometrically with order and the lengths
+ * rise geometrically, so the ratio is the slope of ln(quantity) against order
+ * — a fit over every usable order at once, not a mean of the steps between
+ * them. R² comes back with it, because a ratio quoted from a set of points
+ * that are not on a line is not describing anything.
+ */
+function horton(value: (o: number) => number, sign: number): {
+  ratio: number; r2: number; used: number[];
+} {
+  const used = orders.filter((o) => (nSeg.get(o) ?? 0) >= MIN_SEGMENTS);
+  if (used.length < 2) return { ratio: 0, r2: 0, used };
+  const ys = used.map((o) => Math.log(Math.max(value(o), 1e-9)));
+  const xb = used.reduce((a, b) => a + b, 0) / used.length;
+  const yb = ys.reduce((a, b) => a + b, 0) / ys.length;
+  let num = 0;
+  let den = 0;
+  used.forEach((o, i) => {
+    num += (o - xb) * (ys[i] - yb);
+    den += (o - xb) ** 2;
+  });
+  const slope = num / den;
+  let ssTot = 0;
+  let ssRes = 0;
+  used.forEach((o, i) => {
+    ssTot += (ys[i] - yb) ** 2;
+    ssRes += (ys[i] - (yb + slope * (o - xb))) ** 2;
+  });
+  return { ratio: Math.exp(sign * slope), r2: ssTot > 0 ? 1 - ssRes / ssTot : 1, used };
+}
+
+process.stdout.write('drainage network\n  order   segments   mean length     Rb step\n');
 for (const o of orders) {
   const n = nSeg.get(o)!;
   const l = lenSum.get(o)! / n / 1000;
-  process.stdout.write(`  ${String(o).padStart(5)}   ${String(n).padStart(8)}   ${l.toFixed(0).padStart(8)} km\n`);
   const prev = nSeg.get(o - 1);
-  if (prev && n > 0) {
-    bifSum += prev / n;
-    bifN++;
-    lenRatioSum += l / (lenSum.get(o - 1)! / prev / 1000);
-    lenRatioN++;
-  }
+  const stepRb = prev && n > 0 ? `${(prev / n).toFixed(2).padStart(7)}` : '      -';
+  const thin = n < MIN_SEGMENTS ? '  (too few to fit)' : '';
+  process.stdout.write(
+    `  ${String(o).padStart(5)}   ${String(n).padStart(8)}   ${l.toFixed(0).padStart(8)} km   ${stepRb}${thin}\n`,
+  );
 }
+
+const rb = horton((o) => nSeg.get(o)!, -1);
+const rl = horton((o) => lenSum.get(o)! / nSeg.get(o)!, 1);
 
 // Drainage density has a hard ceiling of 1/spacing: you cannot fit more
 // channel into a cell than one channel per cell. Comparing the raw number to
@@ -324,8 +392,10 @@ process.stdout.write(`
   drainage density           ${density.toFixed(3)}   0.5–5    km/km², ceiling at this
                                              resolution ${ceiling.toFixed(3)} — sub-grid
                                              density is the runtime's job
-  bifurcation ratio Rb       ${rng(bifN ? bifSum / bifN : 0, EARTH.bifurcation)}
-  length ratio Rl            ${rng(lenRatioN ? lenRatioSum / lenRatioN : 0, EARTH.lengthRatio)}
+  bifurcation ratio Rb       ${rng(rb.ratio, EARTH.bifurcation)}   R2 ${rb.r2.toFixed(3)}
+  length ratio Rl            ${rng(rl.ratio, EARTH.lengthRatio)}   R2 ${rl.r2.toFixed(3)}
+                                             fitted over orders ${rb.used.join(', ')} of
+                                             ${orders.join(', ')} — see MIN_SEGMENTS
 
 timings (ms)  ${Object.entries(out.timings).map(([k, v]) => `${k} ${v}`).join('   ')}
 `);
