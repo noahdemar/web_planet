@@ -1,11 +1,7 @@
-# Build the planet and publish it to GitHub Pages.
+# Build and publish the client-side planet to GitHub Pages.
 #
-# The planet is solved in the browser now, so this is no longer load-bearing —
-# a deploy with no asset at all still works, it just costs each first-time
-# visitor a minute of CPU instead of a 12.7 MB download. It is kept because
-# baking the *default* seed here is 45 s and saves them that minute, and because
-# `npm run realism` below is a real gate: it refuses to publish a planet the
-# checked-in baselines do not describe.
+# The planet bakes in the browser, so the workflow only typechecks, scans
+# shaders, and produces a static build for Pages.
 name: Pages
 
 on:
@@ -38,19 +34,10 @@ jobs:
 
       - run: npm ci
 
-      # The checks are cheap and they run against the *baked* planet below, so
-      # they go after it — but the typecheck and the shader scan need nothing
-      # and catch the most common breakage first.
+      # The planet bakes client-side, so only code/shader sanity checks and the
+      # static build run in CI.
       - run: npx tsc --noEmit
       - run: npm run check:shaders
-
-      - name: Bake the reference planet
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: npm run bake -- --write
-
-      - name: Check the planet is the one the baselines describe
-        run: npm run realism
 
       - name: Build
         env:
