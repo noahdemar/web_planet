@@ -182,7 +182,7 @@ export function maxOctavesFor(f0: number, lacunarity: number = RELIEF_LACUNARITY
   return Math.floor(Math.log(MAX_NOISE_FREQ / f0) / Math.log(lacunarity)) + 1;
 }
 
-export const DEFAULT_OCTAVES = maxOctavesFor(AMP_F0);
+export const DEFAULT_OCTAVES = 14;
 
 /**
  * Wavelength below which relief stops being fractal, metres.
@@ -857,7 +857,18 @@ export const CLOUD_SPIN = 0.002;
  * a front, which is what that zone should look like, rather than a filament.
  */
 export const CLOUD_ZONAL = 0.002;
-export const CLOUD_SHEAR_MAX = 0.35;
+/**
+ * Half the peak-to-peak differential, because `band` runs -1 to +1: the
+ * equator lags by this and the mid latitudes lead by it. The note above sizes
+ * the strain from 0.35 rad across the reversal, which is the *full* swing, so
+ * this is half of it. At 0.35 the swing was 0.7 and the strain 3.0 — cells
+ * drawn out past 3:1, which is filament, not front.
+ *
+ * It never showed as filament before, because until the tanh above was fixed
+ * the profile was a step: the shear was zero either side and infinite at the
+ * joint, so the strain this number controls was never actually applied.
+ */
+export const CLOUD_SHEAR_MAX = 0.175;
 
 /**
  * Draw the drainage network as a river at all.
