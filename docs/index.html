@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+    <title>world_sim — M1</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; height: 100%; overflow: hidden; background: #05070a;
+        touch-action: none; user-select: none; -webkit-user-select: none;
+        -webkit-touch-callout: none;
+      }
+      canvas { display: block; touch-action: none; user-select: none; -webkit-user-select: none; }
+
+      #hud {
+        position: fixed; top: 12px; left: 12px; z-index: 10;
+        font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+        color: #cfe3d8; background: rgba(8, 14, 12, 0.72);
+        border: 1px solid rgba(120, 170, 150, 0.22);
+        border-radius: 4px; padding: 10px 12px; min-width: 268px;
+        max-width: calc(100vw - 24px); max-height: calc(100vh - 24px);
+        overflow-y: auto;
+        backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        user-select: none; -webkit-user-select: none;
+        transition: opacity 0.2s ease, transform 0.2s ease;
+      }
+      #hud.hidden {
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(-8px);
+      }
+      #hud h1 {
+        font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+        margin: 0 0 8px; color: #6f9a86; font-weight: 600;
+      }
+      #hud .row { display: flex; justify-content: space-between; gap: 16px; }
+      #hud .row span:last-child { color: #eaf5ef; font-variant-numeric: tabular-nums; }
+      #hud .sep { height: 1px; background: rgba(120,170,150,0.18); margin: 8px 0; }
+      #hud .warn { color: #e0a86a; }
+      #hud .good { color: #7fc9a0; }
+      #hud .hint { color: #5f7d70; font-size: 11px; margin-top: 8px; line-height: 1.6; }
+      #hud kbd {
+        background: rgba(120,170,150,0.14); border-radius: 3px;
+        padding: 0 4px; font: inherit; color: #9dbfae;
+      }
+
+      /* ── Mobile UI Overlay & Touch Joystick ── */
+      .mobile-ui {
+        position: fixed; inset: 0; z-index: 20;
+        pointer-events: none; user-select: none; -webkit-user-select: none;
+        -webkit-touch-callout: none;
+      }
+
+      .mobile-topbar {
+        position: absolute;
+        top: max(12px, env(safe-area-inset-top, 12px));
+        right: max(12px, env(safe-area-inset-right, 12px));
+        display: flex; gap: 8px; pointer-events: auto;
+      }
+
+      .mobile-action-cluster {
+        position: absolute;
+        bottom: max(16px, env(safe-area-inset-bottom, 16px));
+        right: max(16px, env(safe-area-inset-right, 16px));
+        display: flex; flex-direction: column; align-items: flex-end;
+        gap: 10px; pointer-events: auto;
+      }
+
+      .mobile-flight-group,
+      .mobile-nav-group {
+        display: flex; gap: 8px;
+      }
+
+      .mobile-btn {
+        touch-action: none; min-height: 40px; min-width: 44px;
+        padding: 8px 14px;
+        font: 12px/1 ui-monospace, "SF Mono", Menlo, monospace;
+        letter-spacing: 0.06em; text-transform: uppercase;
+        color: #cfe3d8; background: rgba(8, 14, 12, 0.76);
+        border: 1px solid rgba(120, 170, 150, 0.35);
+        border-radius: 6px; cursor: pointer;
+        backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        user-select: none; -webkit-user-select: none;
+        display: inline-flex; align-items: center; justify-content: center;
+        transition: background 0.15s, border-color 0.15s, transform 0.1s;
+      }
+
+      .mobile-btn:active,
+      .mobile-btn.active-state {
+        background: rgba(36, 70, 56, 0.9);
+        border-color: #7fc9a0; color: #ffffff;
+        transform: scale(0.95);
+      }
+
+      .mobile-btn.mode-walk {
+        border-color: #7fc9a0; color: #7fc9a0;
+      }
+
+      .touch-joystick {
+        position: fixed; pointer-events: none; z-index: 15;
+        width: 100px; height: 100px; margin-left: -50px; margin-top: -50px;
+      }
+
+      .joystick-base {
+        width: 100%; height: 100%; border-radius: 50%;
+        background: rgba(8, 14, 12, 0.45);
+        border: 2px solid rgba(127, 201, 160, 0.4);
+        box-shadow: 0 0 16px rgba(0, 0, 0, 0.5), inset 0 0 12px rgba(127, 201, 160, 0.15);
+        backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+        position: relative; display: flex; align-items: center; justify-content: center;
+      }
+
+      .joystick-thumb {
+        position: absolute; width: 42px; height: 42px; border-radius: 50%;
+        background: radial-gradient(circle at 35% 35%, #9ae2be 0%, #4a8067 70%, #204030 100%);
+        border: 1px solid rgba(255, 255, 255, 0.5);
+        box-shadow: 0 0 12px rgba(127, 201, 160, 0.7);
+        will-change: transform;
+      }
+
+      @media (max-width: 700px) {
+        #hud {
+          font-size: 11px; padding: 8px 10px;
+          min-width: 200px; max-width: 75vw; max-height: 50vh;
+          top: max(8px, env(safe-area-inset-top, 8px));
+          left: max(8px, env(safe-area-inset-left, 8px));
+        }
+        #hud .hint { display: none; }
+      }
+
+      #err {
+        position: fixed; inset: 0; z-index: 100; display: none;
+        align-items: center; justify-content: center; padding: 40px;
+        background: #05070a; color: #e8b4a0;
+        font: 13px/1.7 ui-monospace, Menlo, monospace;
+      }
+      #err div { max-width: 60ch; white-space: pre-wrap; }
+      #err b { color: #f0d0b8; display: block; margin-bottom: 10px; font-size: 15px; }
+
+      /* The planet is solved in the browser, and the solve is a minute of
+         arithmetic — so it gets a screen rather than a frozen tab. */
+      #boot {
+        position: fixed; inset: 0; z-index: 90; display: flex;
+        align-items: center; justify-content: center; flex-direction: column;
+        gap: 18px; background: #05070a; color: #cfe3d8;
+        font: 13px/1.7 ui-monospace, "SF Mono", Menlo, monospace;
+        transition: opacity 500ms ease; padding: 40px; text-align: center;
+      }
+      #boot.gone { opacity: 0; pointer-events: none; }
+      #boot h1 {
+        font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+        color: #6f9a86; font-weight: 600; margin: 0;
+      }
+      #boot .bar {
+        width: min(420px, 70vw); height: 2px; background: rgba(120,170,150,0.18);
+        border-radius: 2px; overflow: hidden;
+      }
+      #boot .bar i { display: block; height: 100%; width: 0;
+        background: #7fc9a0; transition: width 200ms linear; }
+      #boot .stage { color: #5f7d70; }
+      #boot .note { color: #5f7d70; max-width: 52ch; }
+    </style>
+    <script type="module" crossorigin src="/web_planet/assets/index-CsOcr0dd.js"></script>
+  </head>
+  <body>
+    <div id="hud"></div>
+    <div id="err"><div></div></div>
+    <div id="boot">
+      <h1>Forming the planet</h1>
+      <div class="bar"><i></i></div>
+      <div class="stage">starting</div>
+      <div class="note">
+        Plate tectonics, then erosion and drainage over the whole sphere. This
+        runs once per seed and is kept, so it only happens on a first visit.
+      </div>
+    </div>
+  </body>
+</html>
