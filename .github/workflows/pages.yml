@@ -1,7 +1,5 @@
-# Build and publish the client-side planet to GitHub Pages.
-#
-# The planet bakes in the browser, so the workflow only typechecks, scans
-# shaders, and produces a static build for Pages.
+# Build the client-side planet and commit the static output to docs/
+# on the main branch, so GitHub Pages can deploy directly from main.
 name: Pages
 
 on:
@@ -9,14 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Least privilege that still lets deploy-pages mint its token.
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 # Never let two deploys race; let a newer push win rather than queue behind a
-# 20-minute bake that is already stale.
+# build that is already stale.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -47,17 +42,20 @@ jobs:
           BASE_PATH: /${{ github.event.repository.name }}/
         run: npx vite build
 
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
+      - name: Publish to docs/
+        run: |
+          rm -rf docs
+          cp -r dist docs
+          touch docs/.nojekyll
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Commit and push docs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs
+          if git diff --cached --quiet; then
+            echo "No changes to docs"
+            exit 0
+          fi
+          git commit -m "Publish docs from main [skip ci]"
+          git push

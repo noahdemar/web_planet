@@ -63,10 +63,11 @@ bake` prints the reminder when the seed is not the default. To keep a seed, set
 
 ### Publishing to GitHub Pages
 
-`.github/workflows/pages.yml` bakes the planet in CI and publishes `dist`, so
-the 48 MB asset never has to be committed or uploaded. Push to `main`, then set
-**Settings → Pages → Source** to **GitHub Actions**. The bake is the long pole —
-budget 15–30 minutes for the first run.
+`.github/workflows/pages.yml` builds the site in CI and commits the output to
+the `docs/` folder on `main`, so GitHub Pages can deploy directly from the
+branch. Push to `main`, then set **Settings → Pages → Source** to **Deploy from
+a branch**, select `main`, and set the folder to **`/docs`**. The build takes a
+few minutes; the first Pages deployment can take another minute to propagate.
 
 Two things worth knowing before you point anyone at the link:
 
