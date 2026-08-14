@@ -5,7 +5,7 @@
 
 import type { FlyControls } from './controls.js';
 import type { Hud } from './hud.js';
-import type { TerrainMesh, ShadeMode } from './terrainMesh.js';
+import type { TerrainMesh } from './terrainMesh.js';
 
 export interface MobileControlsCallbacks {
   controls: FlyControls;
@@ -21,11 +21,10 @@ export class MobileControls {
   private joystickThumb: HTMLElement;
   private flyBtnGroup: HTMLElement;
   private walkBtn: HTMLButtonElement;
-  private boostBtn: HTMLButtonElement;
   private controls: FlyControls;
   private hud: Hud;
 
-  constructor(private callbacks: MobileControlsCallbacks) {
+  constructor(callbacks: MobileControlsCallbacks) {
     this.controls = callbacks.controls;
     this.hud = callbacks.hud;
 
@@ -113,7 +112,6 @@ export class MobileControls {
       this.controls.boostInput = active;
       boostBtn.classList.toggle('active-state', active);
     });
-    this.boostBtn = boostBtn;
     actionCluster.appendChild(boostBtn);
 
     // Walk / Fly toggle button

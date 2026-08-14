@@ -195,7 +195,7 @@ async function main(): Promise<void> {
   const controls = new FlyControls(renderer.domElement);
   const hud = new Hud(document.getElementById('hud')!);
 
-  let mobileControls: MobileControls;
+  let mobileControls: MobileControls | undefined;
 
   let lodFactor = DEFAULT_LOD_FACTOR;
   let maxLevel = MAX_LEVEL;
