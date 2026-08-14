@@ -134,9 +134,30 @@ async function main(): Promise<void> {
   // see planetSource.ts. The seed comes from ?seed=, so a different world is a
   // URL rather than a rebuild.
   const boot = document.getElementById('boot')!;
+  const bootBar = boot.querySelector('.bar i') as HTMLElement;
+  const bootStage = boot.querySelector('.stage') as HTMLElement;
   const seed = seedFromLocation();
-  const surface = await planetSurface(seed, () => {
-    // The boot screen now shows a single static message.
+  // Each stage reports 0..1 on its own, so the bar has to be told how much of
+  // the wall clock each one is worth or it fills and resets three times.
+  // Measured at 512: grid 0.2 s, tectonics 8 s, erosion 37 s, channels 0.4 s.
+  const SPAN: Record<string, [number, number]> = {
+    grid: [0, 0.01],
+    tectonics: [0.01, 0.19],
+    erosion: [0.19, 0.99],
+    done: [0.99, 1],
+  };
+  const LABEL: Record<string, string> = {
+    grid: 'building the sphere',
+    tectonics: 'drifting the plates',
+    erosion: 'eroding, and routing the water',
+    done: 'finishing',
+    cached: 'loading the planet you already have',
+    downloaded: 'loading the prebuilt planet',
+  };
+  const surface = await planetSurface(seed, (stage, t) => {
+    const [a, b] = SPAN[stage] ?? [0, 1];
+    bootBar.style.width = `${((a + (b - a) * t) * 100).toFixed(1)}%`;
+    bootStage.textContent = LABEL[stage] ?? stage;
   });
 
   const selector = new PatchSelector(DEFAULT_LOD_FACTOR);
