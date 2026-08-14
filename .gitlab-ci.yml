@@ -1,0 +1,48 @@
+# GitLab CI/CD Pipeline
+# Runs typechecks, shader validations, and static build matching GitHub Pages pipeline
+image: node:22
+
+stages:
+  - test
+  - build
+  - deploy
+
+default:
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - .npm/
+
+# Sanity checks: typecheck and scan WGSL shader templates
+check:
+  stage: test
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npx tsc --noEmit
+    - npm run check:shaders
+
+# Build static bundle for web
+build:
+  stage: build
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npx vite build
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+
+# Publish to GitLab Pages
+pages:
+  stage: deploy
+  dependencies:
+    - build
+  script:
+    - mv dist public
+  artifacts:
+    paths:
+      - public/
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

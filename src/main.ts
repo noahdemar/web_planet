@@ -16,6 +16,7 @@ import { heightAt, setPlanetSurface } from './heightCPU.js';
 import { PatchSelector } from './quadtree.js';
 import { TerrainMesh, type ShadeMode } from './terrainMesh.js';
 import { FlyControls } from './controls.js';
+import { MobileControls } from './mobileControls.js';
 import { Grass } from './grass.js';
 import { Hud } from './hud.js';
 import { directionToFace } from './cubesphere.js';
@@ -194,42 +195,7 @@ async function main(): Promise<void> {
   const controls = new FlyControls(renderer.domElement);
   const hud = new Hud(document.getElementById('hud')!);
 
-  // ── walk / fly toggle ──────────────────────────────────────────────────
-  //
-  // A button rather than only a key, because the one thing a new viewer wants
-  // to do with a planet is stand on it, and there is no way to guess a
-  // keybinding. It stays in sync with the G key, which does the same thing.
-  const walkBtn = document.createElement('button');
-  walkBtn.id = 'walk';
-  walkBtn.style.cssText = [
-    'position:fixed',
-    'left:16px',
-    'bottom:16px',
-    'z-index:10',
-    'padding:10px 16px',
-    'font:13px ui-monospace,SFMono-Regular,Menlo,monospace',
-    'letter-spacing:0.08em',
-    'text-transform:uppercase',
-    'color:#dfe6df',
-    'background:rgba(12,18,14,0.72)',
-    'border:1px solid rgba(190,220,190,0.35)',
-    'border-radius:4px',
-    'cursor:pointer',
-    'backdrop-filter:blur(6px)',
-  ].join(';');
-  const syncWalkBtn = (): void => {
-    walkBtn.textContent = controls.walk ? 'Fly' : 'Walk';
-    walkBtn.title = controls.walk
-      ? 'Back to free flight (G)'
-      : 'Stand on the surface and walk — WASD, Ctrl to run (G)';
-  };
-  walkBtn.addEventListener('click', () => {
-    controls.setWalk(!controls.walk);
-    syncWalkBtn();
-    renderer.domElement.focus();
-  });
-  syncWalkBtn();
-  document.body.appendChild(walkBtn);
+  let mobileControls: MobileControls;
 
   let lodFactor = DEFAULT_LOD_FACTOR;
   let maxLevel = MAX_LEVEL;
@@ -279,7 +245,7 @@ async function main(): Promise<void> {
         // Walk supersedes plain ground-follow: it is the same pinning plus the
         // two constraints that stop it being flight at ankle height.
         controls.setWalk(!controls.walk);
-        syncWalkBtn();
+        mobileControls?.syncState();
         break;
       case 'KeyT':
         controls.dropToSurface();
@@ -650,6 +616,25 @@ async function main(): Promise<void> {
     clouds.setSun(sun, sunColour);
   }
   aimSun(sunEl, sunAz);
+
+  let currentShadeMode = 0;
+  const cycleShadeMode = () => {
+    currentShadeMode = (currentShadeMode + 1) % 7;
+    terrain.setMode(currentShadeMode as ShadeMode);
+  };
+  const toggleSun = () => {
+    sunFollow = !sunFollow;
+    if (sunFollow) aimSun(sunEl, sunAz);
+    else applySun(sunFromClock());
+  };
+
+  mobileControls = new MobileControls({
+    controls,
+    hud,
+    terrain,
+    onToggleSun: toggleSun,
+    onCycleShadeMode: cycleShadeMode,
+  });
 
   const exposure = new AutoExposure();
   /** Where sim.tour.next() is up to. */

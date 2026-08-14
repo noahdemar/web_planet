@@ -94,6 +94,18 @@ export class FlyControls {
   /** Vertical look inversion, toggled with I. Horizontal is never inverted. */
   invertY = false;
 
+  /** Mobile touch input overrides */
+  verticalInput = 0;
+  boostInput = false;
+  onJoyChange?: (state: {
+    active: boolean;
+    startX: number;
+    startY: number;
+    thumbX: number;
+    thumbY: number;
+    maxR: number;
+  }) => void;
+
   /** Local frame, refreshed each update. */
   up: V3 = [0, 0, 1];
   forward: V3 = [0, 1, 0];
@@ -238,8 +250,8 @@ export class FlyControls {
         const dy = t.clientY - s.lastY;
         s.lastX = t.clientX;
         s.lastY = t.clientY;
-        if (s.side === 'right' && rightSide.length === 1) {
-          const scale = 0.0022;
+        if (s.side === 'right' && rightSide.length === 1 && !this.pinchActive) {
+          const scale = 0.0024;
           this.yaw += dx * scale;
           this.pitch += (this.invertY ? 1 : -1) * dy * scale;
           this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch));
@@ -274,7 +286,7 @@ export class FlyControls {
         this.pinchStart = dist;
         this.pinchMul = this.speedMul;
         this.pinchActive = true;
-      } else {
+      } else if (this.pinchStart > 0) {
         this.speedMul = Math.max(1e-4, Math.min(1e4, this.pinchMul * (dist / this.pinchStart)));
       }
     } else {
@@ -282,22 +294,51 @@ export class FlyControls {
     }
   }
 
+  private readonly joyMaxR = 50;
+
   private updateTouchJoy(): void {
     const left = [...this.touches.values()].filter((s) => s.side === 'left')[0];
+    let startX = 0;
+    let startY = 0;
+    let thumbX = 0;
+    let thumbY = 0;
+
     if (left) {
       this.joyActive = true;
-      const maxR = 80;
+      startX = left.startX;
+      startY = left.startY;
       const dx = left.lastX - left.startX;
       const dy = left.lastY - left.startY;
       const r = Math.hypot(dx, dy);
-      const n = r === 0 ? 0 : Math.min(r, maxR) / r;
-      this.joy.x = (dx / maxR) * n;
-      this.joy.y = (dy / maxR) * n;
+      const clampedR = Math.min(r, this.joyMaxR);
+      const nx = r === 0 ? 0 : dx / r;
+      const ny = r === 0 ? 0 : dy / r;
+      thumbX = startX + nx * clampedR;
+      thumbY = startY + ny * clampedR;
+
+      const deadzone = 4;
+      if (r < deadzone) {
+        this.joy.x = 0;
+        this.joy.y = 0;
+      } else {
+        const factor = (clampedR - deadzone) / (this.joyMaxR - deadzone);
+        this.joy.x = nx * factor;
+        this.joy.y = ny * factor;
+      }
     } else {
       this.joyActive = false;
       this.joy.x = 0;
       this.joy.y = 0;
     }
+
+    this.onJoyChange?.({
+      active: this.joyActive,
+      startX,
+      startY,
+      thumbX,
+      thumbY,
+      maxR: this.joyMaxR,
+    });
   }
 
   /** Rebuild the local horizon frame and the view direction from yaw/pitch. */
@@ -336,9 +377,9 @@ export class FlyControls {
     const str = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0) + joyX;
     const vert = this.walk
       ? 0
-      : (k.has('Space') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') ? 1 : 0);
+      : (k.has('Space') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') ? 1 : 0) + this.verticalInput;
 
-    const running = k.has('ControlLeft') || k.has('ControlRight');
+    const running = k.has('ControlLeft') || k.has('ControlRight') || this.boostInput;
     const boost = running ? (this.walk ? RUN_MULTIPLIER : 8) : 1;
     const v = this.speed * boost * dt;
 

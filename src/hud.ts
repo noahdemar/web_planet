@@ -62,6 +62,18 @@ export class Hud {
     this.el = el;
   }
 
+  toggle(): void {
+    this.el.classList.toggle('hidden');
+  }
+
+  setVisible(visible: boolean): void {
+    this.el.classList.toggle('hidden', !visible);
+  }
+
+  isVisible(): boolean {
+    return !this.el.classList.contains('hidden');
+  }
+
   render(s: HudState, now: number): void {
     // 10 Hz: DOM writes are not free, and this must not perturb what it measures.
     if (now - this.last < 100) return;
