@@ -24,7 +24,8 @@ import { auditCracks, probeDrawnHeight } from './devAudit.js';
 import { Vegetation } from './vegetation.js';
 import { Sky } from './sky.js';
 import { Clouds } from './clouds.js';
-import { CASCADES, Shadows } from './shadows.js';
+import { CASCADES, CASTER_DEPTH, Shadows } from './shadows.js';
+import { ShadowInspector } from './shadowDebug.js';
 import { createShadowUniforms, makeShadowFactor } from './shaders/shadowSample.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
@@ -120,6 +121,7 @@ async function main(): Promise<void> {
   const camera = new PerspectiveCamera(62, innerWidth / innerHeight, 1, 1e7);
 
   const shadows = new Shadows();
+  const shadowInspector = new ShadowInspector(shadows);
   const shadowU = createShadowUniforms();
   const shadowFactor = makeShadowFactor(shadowU, shadows);
   const shadowOf = (rel: unknown) => shadowFactor(rel as never) as never;
@@ -247,6 +249,9 @@ async function main(): Promise<void> {
       case 'KeyG':
         gridIdx = (gridIdx + 1) % GRID_STEPS.length;
         terrain.setGrid(GRID_STEPS[gridIdx]);
+        break;
+      case 'KeyM':
+        shadowInspector.cycle();
         break;
       case 'BracketLeft':
         lodFactor = Math.max(0.5, lodFactor - 0.2);
@@ -433,9 +438,17 @@ async function main(): Promise<void> {
         // shadow pass is vertex-bound and patch count is the lever. A coarser
         // LOD is nearly free visually: cascade 2's texel is 1.4 m, so geometry
         // finer than that cannot be recorded anyway.
-        selector.setDistanceCap(shadows.radii[CASCADES - 1] * 1.5);
+        // The cap is a *sphere* and a cascade is a *box*, so it has to reach
+        // the box's far corner or the corners hold no casters. The centre is
+        // led 0.65 radii ahead and dropped to the surface, and the corner is
+        // another radius x sqrt(2) out, so the far corner sits 2.07 radii from
+        // the camera's ground point and `alt` above it. At 1.5 the corners were
+        // simply not selected — the missing wedge the inspector draws magenta.
+        const far2 = shadows.radii[CASCADES - 1] * (0.65 + Math.SQRT2);
+        selector.setDistanceCap(Math.hypot(far2, alt) * 1.08);
         selector.setLodFactor(SHADOW_LOD_FACTOR);
         selector.setMaxLevel(17);
+        selector.setFrustumCull(false);
         const shadowStats = selector.select(
           controls.pos,
           controls.groundRadius,
@@ -462,6 +475,7 @@ async function main(): Promise<void> {
         renderer.setClearColor(0x000000, 1);
 
         // Restore the display selection.
+        selector.setFrustumCull(true);
         selector.setDistanceCap(Infinity);
         selector.setLodFactor(lodFactor);
         selector.setMaxLevel(maxLevel);
@@ -479,6 +493,12 @@ async function main(): Promise<void> {
     shadowU.sync(shadows, sun);
 
     renderer.render(scene, camera);
+    // The ramp has to span the cascade's *depth* extent, not its radius: the
+    // light frustum reaches CASTER_DEPTH either side of the centre, so a ramp
+    // of one radius clips most of the map to flat black and flat white and
+    // hides exactly the structure this is for.
+    shadowInspector.setRange(shadows.radii[Math.max(0, shadowInspector.cascade)] + CASTER_DEPTH);
+    shadowInspector.render(renderer);
     if (firstFrame) {
       firstFrame = false;
       boot.classList.add('gone');
@@ -598,7 +618,17 @@ async function main(): Promise<void> {
   let timeOfDay = 0.31;
   /** Seconds of wall clock per planetary day. Scrub with , and . */
   let dayLength = 240;
-  let dayRunning = true;
+  /**
+   * Paused at start, resumed with J.
+   *
+   * A moving sun is the wrong default for the thing people do first, which is
+   * look at something and judge it. It also quietly invalidates any A/B: two
+   * screenshots of the same viewpoint seconds apart have different lighting,
+   * and every comparison this project makes — shadows, cloud seams, terrain
+   * relief — is a comparison of shading. The day cycle is a feature you turn
+   * on, not a clock you have to outrun.
+   */
+  let dayRunning = false;
 
   function sunFromClock(): Vector3 {
     const a = timeOfDay * Math.PI * 2;
@@ -687,6 +717,7 @@ async function main(): Promise<void> {
       sky,
       clouds,
       shadows,
+      shadowInspector,
       aimSun,
       // Both vegetation and the sky are hidden for the audit. Crowns
       // silhouetted against the sky would read as enclosed background, and the

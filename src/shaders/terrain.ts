@@ -368,8 +368,22 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
   // CLOUD_SHEAR_MAX. The rigid part may accumulate because it distorts nothing;
   // the differential may not, because it is a shear.
   let band = mix(-1.0, 1.0, smoothstep(0.26, 0.48, lat));
-  let slip = ${f(CLOUD_SHEAR_MAX)}
-           * tanh(t * band * ${f(CLOUD_ZONAL)} / ${f(CLOUD_SHEAR_MAX)});
+  // The saturation must apply to *time*, not to latitude, and putting band
+  // inside the tanh applied it to both. tanh(t·band·k) -> sign(band) as t
+  // grows, so the smooth latitude profile collapsed into a step: the offset
+  // went from -CLOUD_SHEAR_MAX to +CLOUD_SHEAR_MAX across a latitude interval
+  // that narrowed without bound. That is 40 deg of longitude across a joint
+  // that keeps sharpening, and it draws a hairline seam along the two circles
+  // where band crosses zero — about +-21.7 deg — with the cloud visibly
+  // chopped and offset either side. Invisible on a fresh load and knife-sharp
+  // within a few minutes, which is why it reads as a glitch that "appears".
+  //
+  // It is the same tear as the original select(), one derivative up: bounding
+  // the magnitude with a tanh stopped the offset growing and left the
+  // *gradient* free to grow instead. The bound belongs on the time factor
+  // alone, leaving band as the smooth multiplier it was meant to be.
+  let slip = ${f(CLOUD_SHEAR_MAX)} * band
+           * tanh(t * ${f(CLOUD_ZONAL)} / ${f(CLOUD_SHEAR_MAX)});
   let spin = t * ${f(CLOUD_SPIN)} + slip;
   let cs = cos(spin);
   let sn = sin(spin);

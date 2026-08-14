@@ -333,11 +333,28 @@ export class Vegetation {
     for (let b = 0; b < BANDS; b++) {
       // What an instance *is* changes with the band, which is the whole point
       // of binning them (SPEC.md §8). The near band is real geometry — a bole
-      // and a crown, ~150 triangles; the mid band is crossed quads, which have
+      // and a crown, ~510 triangles; the mid band is crossed quads, which have
       // enough parallax to hold up at 45–220 m; the far band is one
       // camera-facing quad.
+      //
+      // 16 radial segments, not 7, and the reason is Nyquist rather than
+      // taste. `treeRH_` shapes the crown with wobble terms at 3θ and 5θ; five
+      // cycles around the trunk need more than ten samples to be resolved at
+      // all, and seven undersamples them. The mesh was not drawing a lobed
+      // crown coarsely — it was drawing the *alias* of one, which is why a
+      // close tree read as a lumpy heptagon whose facets swam as you walked
+      // round it. The profile always had the detail; the tessellation was
+      // throwing it away.
+      //
+      // Deliberately *only* the tessellation. The mid band's billboards carry
+      // their own silhouette in `shadeVegetation`, and the two have to agree
+      // across the 45 m handover — so resolving the existing profile is safe
+      // where changing it is not.
+      //
+      // Cost is bounded by the band, not the forest: ~350 instances at 512
+      // triangles is 180k, against ~4.2M in the frame at ground level.
       const isTree = b === 0;
-      const geo = isTree ? treeGeometry(7, 3, 8) : quadGeometry(b === 1 ? 3 : 0);
+      const geo = isTree ? treeGeometry(16, 4, 12) : quadGeometry(b === 1 ? 3 : 0);
       geo.indirect = this.argsAttr;
       geo.indirectOffset = b * ARGS * 4; // bytes
 

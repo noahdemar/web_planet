@@ -572,6 +572,46 @@ cut.
 switch on a quantity that *accumulates* is worse, and needs a different test:
 run it for an hour, not a frame.
 
+### The same bug came back, one derivative up
+
+The fix above bounded the *magnitude* with a tanh:
+
+    slip = SHEAR_MAX · tanh(t · band · ZONAL / SHEAR_MAX)
+
+`band` went **inside** the tanh, so the saturation applied to latitude as well
+as to time. As t grows, `tanh(t · band · k) -> sign(band)`, and the smooth
+latitude profile collapses into a step: the offset swings from -SHEAR_MAX to
++SHEAR_MAX across a latitude interval that narrows *without bound*. That is 40
+degrees of longitude across a joint that keeps sharpening, and it draws a
+hairline seam along the two circles where band crosses zero — about ±21.7° —
+with the cloud visibly chopped and offset either side.
+
+So the tear never went away. Bounding the value simply moved the unbounded
+growth into the *gradient*, where it was harder to see and produced a thinner,
+more convincing-looking artefact. Same signature as before, too: invisible on a
+fresh load, knife-sharp within a few minutes.
+
+The bound belongs on the time factor alone — `SHEAR_MAX · band · tanh(t·k)` —
+leaving `band` the smooth multiplier it was always meant to be.
+
+Two further things fell out of it, and both are the interesting part:
+
+- Fixing it exposed a constant that had never actually done anything.
+  `CLOUD_SHEAR_MAX` documents a shear strain of 1.5 drawing a cell to 1.8:1.
+  While the profile was a step, the shear was *zero either side and infinite at
+  the joint*, so that number was never applied. Switching it on for the first
+  time revealed it was also double what the comment described, because `band`
+  runs -1 to +1 and the note sized the full swing. A constant whose effect is
+  bypassed by a bug is not a tuned constant; it is an untested guess wearing a
+  comment.
+- The seam had been reported twice as "a seam along a line of longitude". It is
+  a line of *latitude*. A misread of the symptom sent the first investigation at
+  the advection's longitude term, which was innocent both times.
+
+**Rule:** when you bound something to stop it growing, check what you moved the
+growth *into*. Magnitude, gradient and curvature are all things that can run
+away, and a tanh only ever bounds the first.
+
 ---
 
 ## 20. How you compute the number is part of the measurement
@@ -631,8 +671,69 @@ check the fix by measuring the moment rather than by looking at it.
 
 ---
 
-## 22. Still open
+## 22. When two causes share a symptom, build the thing that tells them apart
 
+A shadow-map cascade cannot distinguish *"nothing occludes this"* from *"I was
+not given the occluder"*. Both read as the clear value, both come back lit, and
+on screen both produce a straight-edged quadrilateral on the ground. The
+*opposite* failure — a wrong or too-coarse caster — produces a straight-edged
+quadrilateral too, just dark. Three separate sessions have now chased
+quadrilaterals through the bias, the cascade selection, the caster frustum
+depth, the patch skirt and the cross-fade, by reasoning backwards from the
+shaded image. That reasoning has been wrong nearly every time, because the
+image genuinely does not contain the distinguishing information.
+
+The instrument is ten minutes of work: draw the map. `src/shadowDebug.ts`
+renders a cascade to a screen overlay with the sentinel colour-coded, which is
+exact rather than heuristic because `SHADOW_DEPTH_OFFSET` already guarantees
+every written value is positive. Magenta means nothing was recorded; grey means
+something was. A lit artefact over magenta is a missing caster. A dark artefact
+over grey is a wrong caster.
+
+Pointed at a view that had been resisting explanation, it showed a quarter of
+cascade 2 magenta with a patch-shaped edge, and two real bugs fell out
+immediately:
+
+- **The shadow pass culled its casters against the main camera's frustum.**
+  `select()` builds its frustum from the matrices it is handed, and the shadow
+  pass was handing it the camera's. Terrain beside and behind the camera casts
+  into the map; culling it left the map cleared there.
+- **The distance cap is a sphere and a cascade is a box.** `radii[2] · 1.5`
+  does not reach a corner that sits at `radii[2] · (0.65 + √2)`. The corners
+  simply had no casters selected. This is the *same* sphere/box mismatch §13
+  records fixing on the sampling side, still present on the selection side —
+  fix the class, not the instance (§18).
+
+What it cost to not have the instrument: a symptom-level fix (override the near
+cascade with the far one) that cleared the artefact under test, passed a
+one-viewpoint check, and introduced a dark quadrilateral somewhere else. It had
+to be reverted. The real fix was two lines in the selection and made the
+symptom-level fix unnecessary.
+
+**Rule:** when two opposite causes produce the same symptom, no amount of
+staring at the symptom will separate them. Build the smallest thing that reads
+the intermediate state directly, *before* forming the third hypothesis — not
+after the second one fails.
+
+---
+
+## 23. Still open
+
+- **The dark quadrilaterals are not fixed.** The two selection bugs in §22
+  fixed the *lit* class and the 3 km lake artefact with it. Flat ground under a
+  low sun still shows large dark bands with straight edges and right-angle
+  corners — reproduce with `sim.tour('valley', 700, 28, 130)`, which is a plain
+  with essentially no relief and should have almost no shadow at all. Filling
+  the map barely changed them, so they are *not* missing casters.
+  **Next step:** press `M` to put cascade 2 on screen and read the texels under
+  a band, now that the ramp is calibrated to the light frustum depth
+  (`radius + CASTER_DEPTH`) rather than to one radius — the earlier reading
+  clipped most of the map to flat black and white and hid exactly the structure
+  this is for. Grey under the band means a real occluder is recorded and the
+  question is *which* geometry wrote it; a step in the ramp means a cliff in
+  the map that is not a cliff in the world. Ruled out already, each tested and
+  reverted: caster frustum depth (`CASTER_DEPTH` 4500 → 20 000), patch skirts
+  in the shadow pass, and LOD patch boundaries.
 - **Rivers are hidden again.** `DRAW_RIVERS = 0`. The curve fitting fixed the
   *shape* — the network is smooth and measurably so — but it cannot conjure
   resolution that was never there, and a 1–3 km channel against a 9 km cell

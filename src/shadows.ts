@@ -62,7 +62,7 @@ NO_OCCLUDER.g = -1e9;
 NO_OCCLUDER.b = -1e9;
 
 /** How far the light frustum extends behind the receivers, to catch casters. */
-const CASTER_DEPTH = 4500;
+export const CASTER_DEPTH = 4500;
 
 /**
  * Added to every stored and compared distance so the payload is never negative.

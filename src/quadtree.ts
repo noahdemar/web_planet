@@ -96,6 +96,19 @@ export class PatchSelector {
   private ranges = new Float64Array(MAX_LEVEL + 1);
 
   private frustum = new Frustum();
+  /**
+   * Whether to cull against that frustum at all.
+   *
+   * On for the display pass, off for the shadow pass. A shadow map's casters
+   * are not the camera's visible set: terrain beside and behind the camera
+   * casts into it, and culling that away leaves the map holding its clear
+   * value there. A cleared texel reads as *lit* — see SHADOW_DEPTH_OFFSET —
+   * so the symptom is not a missing shadow, it is a lit quadrilateral punched
+   * into one, with edges at the boundary of whatever the camera happened to
+   * be looking at. Visible in the inspector as a magenta field with a
+   * patch-shaped edge.
+   */
+  private frustumCull = true;
   private tmpMat = new Matrix4();
   private tmpVec = new Vector3();
 
@@ -137,6 +150,11 @@ export class PatchSelector {
    */
   setDistanceCap(d: number): void {
     this.distanceCap = d;
+  }
+
+  /** See `frustumCull`. The shadow pass turns this off; the display pass needs it. */
+  setFrustumCull(on: boolean): void {
+    this.frustumCull = on;
   }
 
   /**
@@ -251,7 +269,8 @@ export class PatchSelector {
     // Frustum cull in camera-relative space (camera sits at the origin).
     const rel = sub(bsC, this.camPos);
     this.tmpVec.set(rel[0], rel[1], rel[2]);
-    if (!this.frustum.intersectsSphere({ center: this.tmpVec, radius: bsR } as never)) {
+    if (this.frustumCull
+        && !this.frustum.intersectsSphere({ center: this.tmpVec, radius: bsR } as never)) {
       this.stats.culledFrustum++;
       return;
     }

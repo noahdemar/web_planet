@@ -67,6 +67,14 @@ function findRuggedLand(octaves: number, hscale: number): V3 {
   return best;
 }
 
+interface TouchState {
+  startX: number;
+  startY: number;
+  lastX: number;
+  lastY: number;
+  side: 'left' | 'right';
+}
+
 export class FlyControls {
   /** World position, f64. The single source of truth for where we are. */
   pos: V3 = [0, 0, RADIUS + 8_000_000];
@@ -101,6 +109,13 @@ export class FlyControls {
   private vx = new Vector3();
   private vy = new Vector3();
   private vz = new Vector3();
+
+  private touches = new Map<number, TouchState>();
+  private joy = { x: 0, y: 0 };
+  private joyActive = false;
+  private pinchActive = false;
+  private pinchStart = 0;
+  private pinchMul = 1;
 
   constructor(private dom: HTMLElement) {
     this.attach();
@@ -187,6 +202,102 @@ export class FlyControls {
     });
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => this.keys.clear());
+    this.attachTouch();
+  }
+
+  /** Touch handling: left half = move joystick, right half = look, two-finger pinch on the right = speed. */
+  private attachTouch(): void {
+    const d = this.dom;
+
+    const getSide = (clientX: number): 'left' | 'right' =>
+      clientX < d.clientWidth / 2 ? 'left' : 'right';
+
+    const onStart = (e: TouchEvent) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        this.touches.set(t.identifier, {
+          startX: t.clientX,
+          startY: t.clientY,
+          lastX: t.clientX,
+          lastY: t.clientY,
+          side: getSide(t.clientX),
+        });
+      }
+      this.updateTouchPinch();
+      this.updateTouchJoy();
+      e.preventDefault();
+    };
+
+    const onMove = (e: TouchEvent) => {
+      const rightSide = [...this.touches.values()].filter((s) => s.side === 'right');
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        const t = e.changedTouches[i];
+        const s = this.touches.get(t.identifier);
+        if (!s) continue;
+        const dx = t.clientX - s.lastX;
+        const dy = t.clientY - s.lastY;
+        s.lastX = t.clientX;
+        s.lastY = t.clientY;
+        if (s.side === 'right' && rightSide.length === 1) {
+          const scale = 0.0022;
+          this.yaw += dx * scale;
+          this.pitch += (this.invertY ? 1 : -1) * dy * scale;
+          this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch));
+        }
+      }
+      this.updateTouchPinch();
+      this.updateTouchJoy();
+      e.preventDefault();
+    };
+
+    const onEnd = (e: TouchEvent) => {
+      for (let i = 0; i < e.changedTouches.length; i++) {
+        this.touches.delete(e.changedTouches[i].identifier);
+      }
+      this.updateTouchPinch();
+      this.updateTouchJoy();
+    };
+
+    d.addEventListener('touchstart', onStart, { passive: false });
+    d.addEventListener('touchmove', onMove, { passive: false });
+    d.addEventListener('touchend', onEnd, { passive: false });
+    d.addEventListener('touchcancel', onEnd, { passive: false });
+  }
+
+  private updateTouchPinch(): void {
+    const right = [...this.touches.values()].filter((s) => s.side === 'right');
+    if (right.length >= 2) {
+      const a = right[0];
+      const b = right[1];
+      const dist = Math.hypot(a.lastX - b.lastX, a.lastY - b.lastY);
+      if (!this.pinchActive) {
+        this.pinchStart = dist;
+        this.pinchMul = this.speedMul;
+        this.pinchActive = true;
+      } else {
+        this.speedMul = Math.max(1e-4, Math.min(1e4, this.pinchMul * (dist / this.pinchStart)));
+      }
+    } else {
+      this.pinchActive = false;
+    }
+  }
+
+  private updateTouchJoy(): void {
+    const left = [...this.touches.values()].filter((s) => s.side === 'left')[0];
+    if (left) {
+      this.joyActive = true;
+      const maxR = 80;
+      const dx = left.lastX - left.startX;
+      const dy = left.lastY - left.startY;
+      const r = Math.hypot(dx, dy);
+      const n = r === 0 ? 0 : Math.min(r, maxR) / r;
+      this.joy.x = (dx / maxR) * n;
+      this.joy.y = (dy / maxR) * n;
+    } else {
+      this.joyActive = false;
+      this.joy.x = 0;
+      this.joy.y = 0;
+    }
   }
 
   /** Rebuild the local horizon frame and the view direction from yaw/pitch. */
@@ -219,8 +330,10 @@ export class FlyControls {
     this.refreshFrame();
 
     const k = this.keys;
-    const fwd = (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0);
-    const str = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0);
+    const joyX = this.joyActive ? this.joy.x : 0;
+    const joyY = this.joyActive ? this.joy.y : 0;
+    const fwd = (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0) - joyY;
+    const str = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0) + joyX;
     const vert = this.walk
       ? 0
       : (k.has('Space') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') ? 1 : 0);
