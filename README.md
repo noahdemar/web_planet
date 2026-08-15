@@ -8,7 +8,7 @@ global bake solving plate tectonics, stream-power erosion and drainage over
 1.57 M cells — **in the browser**, on first visit, then cached; runtime
 amplification whose spectrum varies by biome; climate, biomes, a cloud deck with
 ground shadows, GPU-driven forest and grass. Rivers are carried as curves in the
-bake but not drawn — see LESSONS §22.
+bake but not drawn — see LESSONS §24.
 
 ## Running it
 
@@ -71,9 +71,19 @@ few minutes; the first Pages deployment can take another minute to propagate.
 
 Two things worth knowing before you point anyone at the link:
 
-- **It needs WebGPU.** Chrome/Edge 113+ or Safari 18+. Firefox will show the
-  "Could not start" panel, which is the app telling the truth rather than a
-  broken deploy.
+- **It needs WebGPU.** Chrome/Edge 113+, Safari 18+, Opera 99+, or any current
+  Chromium-based browser. Firefox will show the "Could not start" panel, which
+  is the app telling the truth rather than a broken deploy.
+
+  Presence of the API is not the same as a working one, which is what the
+  startup check actually asks. Chromium forks all ship `navigator.gpu`, so the
+  old `'gpu' in navigator` test passed and the failure surfaced later as
+  three's internal `Unable to create WebGPU adapter.` with a stack trace —
+  advising a reader on a perfectly capable browser to install Chrome. The check
+  now requests an adapter, and when that comes back null it names the real
+  cause: hardware acceleration switched off, or a blocklisted GPU. On Opera and
+  Opera GX it prints the `opera://` settings paths rather than the `chrome://`
+  ones.
 - **First visit costs either a 12.7 MB download or a minute of CPU** — the
   prebuilt planet if the seed is the default, a browser bake otherwise. Both are
   cached afterwards.
@@ -81,17 +91,90 @@ Two things worth knowing before you point anyone at the link:
 ### Checks
 
 ```bash
-npm run verify     # typecheck + shaders + precision + mirror + biomes + realism
+npm run verify     # typecheck + shaders + scaler + precision + mirror + biomes + realism
 npm run realism    # the fast gate: 24 fixed sites vs a stored baseline, ~4 s
+npm run scaler     # adaptive resolution scaler, both clocks
 npm run slopes     # slope distribution vs sampling scale
 ```
+
+### Quality tiers
+
+The calibrated numbers throughout this project were chosen on an M-series
+laptop at 1440p, and a phone is not a small one of those. `src/quality.ts`
+picks a tier at load and every render-side knob follows from it — pixel ratio,
+MSAA, octaves, LOD factor and max level, shadow map size and cascade count,
+vegetation density and buffer size, grass.
+
+| | low (phones) | medium (tablets) | high (desktop) |
+|---|---:|---:|---:|
+| pixel ratio cap | 1 | 1.5 | 2 |
+| MSAA | off | off | on |
+| octaves | 9 | 12 | 14 |
+| LOD factor · max level | 1.5 · 17 | 1.8 · 18 | 2.2 · 19 |
+| shadow map · cascades | 1024 · 2 | 1024 · 2 | 2048 · 3 |
+| vegetation density · slots | 0.45 · 150 k | 0.7 · 200 k | 1 · 400 k |
+| grass | off | on | on |
+
+The adapter is requested with `powerPreference: 'high-performance'`. Nothing
+was passing a preference before, and on a laptop carrying both an integrated
+and a discrete GPU an undefined preference may return the integrated one —
+which swamps every row of that table put together.
+
+Pixel ratio is the first lever because it is the largest: the fragment shader
+carries atmosphere, biome blending and a 3×3 PCF tap, and a phone reporting
+`devicePixelRatio` 3 was rasterising four times the fragments a cap of 1 asks
+for. On a 1280×720 viewport at dpr 1.5 the tiers measure 1280×720 against
+high's 1920×1080 — 2.25× fewer fragments before anything else is counted.
+
+Patch counts follow the LOD factor as its square, measured at
+`broadleaf-steep`, cracks audited at each stop:
+
+| above ground | low | high |
+|---:|---:|---:|
+| 3 m | 381 | 795 |
+| 200 m | 342 | 594 |
+| 4 km | 136 | 248 |
+
+The tier is a starting point, not a cap: `[` `]` `,` `.` `-` `=` still move all
+of it at runtime, up to the desktop ceiling.
+
+**These numbers are reasoned from cost ratios, not measured on a handset** —
+which is a real difference from the rest of the constants here, and the reason
+the overrides below exist. What does not depend on the guesses is the adaptive
+scaler: it steps resolution down when frames overrun and back up when they do
+not, with asymmetric hysteresis so the reallocation hitch is never mistaken for
+the overrun that justifies another.
+
+It steers by **GPU time, not wall-clock frame time**, and that is not a
+refinement. Wall-clock time under vsync is quantised to the refresh interval: a
+healthy frame on a 60 Hz phone measures 16.7 ms whether the GPU spent 4 ms or
+15 ms on it. Against an absolute 15 ms budget that reads as a permanent
+near-overrun, and "comfortably under budget" — the test for headroom — becomes
+unreachable, because the interval cannot fall below the refresh however cheap
+the frame gets. The first version of this scaler steered by wall clock and
+could therefore drop resolution and never restore it. GPU time is the quantity
+resolution actually controls and it is not quantised. A wall-clock path
+survives for browsers without timestamp queries, with thresholds in multiples
+of the measured refresh interval rather than absolute milliseconds, clamped to
+60 Hz so a machine that never once hits its refresh rate cannot adopt a dropped
+frame as its baseline.
+
+`npm run scaler` is the regression: ten cases over both clocks, including the
+drop-then-recover that the wall-clock version failed.
+
+```
+?quality=low|medium|high   force a tier on any device
+?scale=0.75                pin the render scale, bypassing the scaler
+```
+
+The HUD prints the tier, why it was chosen, and the live scale.
 
 ## Controls
 
 | | |
 |---|---|
 | `W` `A` `S` `D` | fly — speed scales with altitude |
-| `Space` / `Shift` | up / down · `Ctrl` boost ×8 |
+| `Space` / `Ctrl` | up / down · `Shift` boost ×8 |
 | drag | look · wheel adjusts speed multiplier |
 | `L` | jump to the most rugged land on the planet |
 | `T` / `R` | drop to surface / reset to orbit |
@@ -103,6 +186,7 @@ npm run slopes     # slope distribution vs sampling scale
 | `1`–`7` | shading: natural, LOD, slope, normals, cover, albedo, climate |
 | `G` | metric grid: off → 100 m → 10 m → 1 m → 10 cm |
 | `[` `]` | LOD factor · `,` `.` octaves · `-` `=` max level |
+| `` ` `` | the readout — hidden by default |
 
 ## What M1 establishes
 
@@ -130,7 +214,18 @@ and exceeds its own sample spacing from level 16 down.
 
 **Crack-free LOD.** `sim.audit()` in the console renders to an offscreen target
 cleared to a colour the terrain cannot produce and counts background pixels
-enclosed by terrain. Currently 0 at every altitude from 3 m to 8000 km.
+enclosed by terrain. Currently 0 at every altitude from 3 m to 8000 km — at the
+low tier's coarser LOD factor as well as the desktop one, which is the case
+that could have opened seams and does not.
+
+That takes two things, not one. The skirt closes vertical mismatches — the
+two-level jumps a single-parity morph cannot bridge. `PATCH_BLEED` closes
+lateral ones: neighbouring patches agree about their shared edge analytically
+but not *bitwise*, because each reconstructs it from its own anchor in f32, and
+a rasteriser leaves a pixel of background wherever two nearly-identical edges
+diverge. Patches therefore overlap by 1e-5 of their own size — under a
+hundredth of a pixel at any level. Without it the seams split into hairlines
+near the ground: 0.54% of terrain pixels at 49 m. See LESSONS §23.
 
 **GPU-driven vegetation.** The CPU uploads ~24 tiles × 20 floats per frame and
 dispatches. Placement, gating, LOD binning and the draw counts all happen on
@@ -229,10 +324,29 @@ inter-crown shadowing while the tinted ground is smooth. Closing that needs the
 canopy normal and height baked into the terrain virtual texture (SPEC §8), not
 more tuning.
 
-**No clouds, and water is a flat sphere.** Both are visible gaps against the
-reference images. Water is a Fresnel term with no waves, no shoreline and no
-depth variation; clouds do not exist, and the Blue Marble is roughly half
-cloud.
+**Water has no geometry.** The surface is still exactly the sphere; what
+changed is that it is no longer shaded as one. A wave field perturbs the
+*normal* — see `waveBlock` in shaders/terrain.ts — which buys the sun glitter
+path, the break-up of the sky reflection and whitecaps, none of which need the
+surface to actually move. What it does not buy is silhouette: a swell never
+occludes what is behind it, and at eye height on open water that is a real
+absence. Displacement needs the water to be its own mesh, which it is not,
+because shading it as part of the terrain is what lets the shoreline resolve
+per pixel instead of along a seam.
+
+The octaves are rungs of the same LOCAL_PERIOD lattice the ground detail uses,
+so the field wraps seamlessly, and each rung advects at its own deep-water
+phase speed — c = sqrt(gλ/2π), so the 128 m swell runs at 14 m/s and the
+half-metre chop at 0.9. Octaves finer than a pixel are not dropped; their mean
+square slope is added to the specular roughness in quadrature, which is what
+turns the sun's reflection from a tight blob up close into a glitter path at
+range without ever aliasing.
+
+Not modelled: anisotropy in the sample coordinate (it would rotate the period
+lattice out of alignment and seam every 4096 m, so the wind direction is
+applied to the gradient instead), refraction of the seabed, caustics, and
+foam persistence — whitecaps appear and vanish with the slope that made them
+rather than decaying.
 
 **Shadow quality is basic.** 3×3 PCF, no contact hardening, no filtering that
 adapts to cascade. Good enough that relief and canopy read correctly; not good
@@ -269,6 +383,7 @@ src/
   quadtree.ts     CDLOD selection, frustum + horizon culling
   terrainMesh.ts  shared patch grid, skirt ring, instance plumbing
   controls.ts     orbit-to-ground camera, f64 world position
+  quality.ts      device tier, and the render scale that tracks the frame clock
   heightCPU.ts    CPU mirror of the height field, for ground-following
   devAudit.ts     offscreen crack counter
   vegetation.ts   GPU scatter, atomic band binning, indirect draw
@@ -277,6 +392,7 @@ src/
     vegetation.ts WGSL: scatter candidate, billboard, foliage shading
 tools/
   precision.ts    f32 vs f64 vertex error, per level
+  scaler.ts       adaptive resolution, against vsync-quantised frame time
   mirror.ts       what the renderer draws, vs Earth's curve; CPU/GPU agreement
   slopes.ts       slope distribution vs sampling scale; the convergence check
   bakeSweep.ts    tectonic parameters against the hypsographic curve

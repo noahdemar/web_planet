@@ -25,14 +25,15 @@ import {
   BAND_FADE_HI,
   BAND_FADE_LO,
   CHANNEL_DEPTH,
-  DRAW_RIVERS,
+  CHANNEL_HALF_HI,
+  CHANNEL_HALF_LO,
+  CHANNEL_WIDTH_K,
   COAST_WARP_AMP,
   COAST_WARP_F0,
   COAST_WARP_FADE,
   COAST_WARP_OCTAVES,
-  CHANNEL_HALF_HI,
-  CHANNEL_HALF_LO,
-  CHANNEL_WIDTH_K,
+  DRAW_RIVERS,
+  EROSION_K,
   FACE_EDGE,
   FLOODPLAIN_AMP,
   HILLSLOPE_GAIN,
@@ -51,7 +52,7 @@ import {
   VALLEY_WET_HI,
   VALLEY_WET_LO,
 } from './planet.js';
-import { shaderNoise } from './shaderNoiseCPU.js';
+import { shaderNoise, shaderNoiseD } from './shaderNoiseCPU.js';
 import { REFERENCE_SPECTRUM, climateAt, spectrumAt, tempAtCPU } from './biome.js';
 import { sampleSurface, type PlanetSurface } from './planetData.js';
 
@@ -298,6 +299,11 @@ export function heightAt(
   let mAmp = 1;
   let mFrq = AMP_F0;
   let mSum = 0;
+  // Erosion accumulator — the frequency-free derivative sum. Mirrors mE in
+  // height_; see EROSION_K.
+  let mEx = 0;
+  let mEy = 0;
+  let mEz = 0;
   let mSq = 0;
   let mBias = 0;
   // The reference ladder, walked alongside — see the normaliser in height_.
@@ -325,14 +331,23 @@ export function heightAt(
       // stood inside the hill.
       //
       // fround costs nothing and makes the two agree bit for bit.
-      const n = shaderNoise(
+      const nd = shaderNoiseD(
         Math.fround(Math.fround(fdx * mFrq) + o),
         Math.fround(Math.fround(fdy * mFrq) + o),
         Math.fround(Math.fround(fdz * mFrq) + o),
       );
+      const n = nd[0];
+      const sg = n >= 0 ? 1 : -1;
       const r = 1 - Math.abs(n);
-      mSum += w * mAmp * r * r;
-      mBias += w * mAmp * RIDGE_MEAN;
+      // Same erosion term as the shader, from the accumulator before this
+      // octave contributes to it.
+      const ero = 1 / (1 + EROSION_K * (mEx * mEx + mEy * mEy + mEz * mEz));
+      mSum += w * mAmp * r * r * ero;
+      mBias += w * mAmp * RIDGE_MEAN * ero;
+      const ek = w * mAmp * 2 * r * sg;
+      mEx -= ek * nd[1];
+      mEy -= ek * nd[2];
+      mEz -= ek * nd[3];
     }
     mSq += mAmp * mAmp;
     rSum += rAmp;

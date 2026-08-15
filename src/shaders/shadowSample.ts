@@ -95,10 +95,13 @@ export function createShadowUniforms(): ShadowUniforms {
       for (let i = 0; i < CASCADES; i++) {
         (matrices[i].value as Matrix4).copy(shadows.matrices[i]);
       }
+      // xyz are the cascade radii, w the strength. A two-cascade build leaves
+      // z unread rather than undefined — `Vector4.set` would take the missing
+      // entry as NaN and poison every shadow test downstream of it.
       (cfg.value as Vector4).set(
         shadows.radii[0],
         shadows.radii[1],
-        shadows.radii[2],
+        shadows.radii[2] ?? 1,
         shadows.strength,
       );
       (sunDir.value as Vector3).copy(sun).normalize();
@@ -170,12 +173,9 @@ export function makeShadowFactor(u: ShadowUniforms, shadows: Shadows) {
     const cfg = n(u.cfg);
     const lit = n(float(1).toVar());
 
-    const uv0 = uvOf(0, rel);
-    const uv1 = uvOf(1, rel);
-    const uv2 = uvOf(2, rel);
-    const c0 = coverOf(uv0);
-    const c1 = coverOf(uv1);
-    const c2 = coverOf(uv2);
+    const uvs = Array.from({ length: CASCADES }, (_, i) => uvOf(i, rel));
+    const covers = uvs.map(coverOf);
+    const radii = [n(cfg.x), n(cfg.y), n(cfg.z)];
 
     // Each cascade fades into the *next one out*, never into "unshadowed".
     //
@@ -194,27 +194,29 @@ export function makeShadowFactor(u: ShadowUniforms, shadows: Shadows) {
     // The full-coverage case is split out so the common path still evaluates a
     // single cascade. coverOf is flat until 0.42 of the half-extent, so ~84% of
     // each cascade's area pays for one lookup and only the ring pays for two.
-    nIf(n(c0.greaterThanEqual(float(1))), () => {
-      lit.assign(cascade(0, rel, n(cfg.x), uv0));
-    }).Else(() => {
-      nIf(n(c0.greaterThan(float(0))), () => {
-        lit.assign(nMix(cascade(1, rel, n(cfg.y), uv1),
-                        cascade(0, rel, n(cfg.x), uv0), c0));
+    //
+    // Built over CASCADES rather than written out, because the count is a
+    // quality-tier decision now and a phone gets two. The outermost needs no
+    // full-coverage branch of its own: `mix(1, cascade(L), 1)` is `cascade(L)`.
+    const chain = (i: number): void => {
+      if (i === CASCADES - 1) {
+        nIf(n(covers[i].greaterThan(float(0))), () => {
+          lit.assign(nMix(float(1), cascade(i, rel, radii[i], uvs[i]), covers[i]));
+        });
+        return;
+      }
+      nIf(n(covers[i].greaterThanEqual(float(1))), () => {
+        lit.assign(cascade(i, rel, radii[i], uvs[i]));
       }).Else(() => {
-        nIf(n(c1.greaterThanEqual(float(1))), () => {
-          lit.assign(cascade(1, rel, n(cfg.y), uv1));
+        nIf(n(covers[i].greaterThan(float(0))), () => {
+          lit.assign(nMix(cascade(i + 1, rel, radii[i + 1], uvs[i + 1]),
+                          cascade(i, rel, radii[i], uvs[i]), covers[i]));
         }).Else(() => {
-          nIf(n(c1.greaterThan(float(0))), () => {
-            lit.assign(nMix(cascade(2, rel, n(cfg.z), uv2),
-                            cascade(1, rel, n(cfg.y), uv1), c1));
-          }).Else(() => {
-            nIf(n(c2.greaterThan(float(0))), () => {
-              lit.assign(nMix(float(1), cascade(2, rel, n(cfg.z), uv2), c2));
-            });
-          });
+          chain(i + 1);
         });
       });
-    });
+    };
+    chain(0);
 
     // Faded, not switched: shadows would otherwise pop off as you climb.
     return nMix(float(1), lit, n(cfg.w));

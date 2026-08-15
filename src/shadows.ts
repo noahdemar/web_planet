@@ -35,19 +35,33 @@ import {
   FloatType,
 } from 'three';
 import type { WebGPURenderer } from 'three/webgpu';
+import { QUALITY } from './quality.js';
 
-/** Cascades. Three is enough given how fast the ranges grow. */
-export const CASCADES = 3;
+/**
+ * Cascades. Three is enough given how fast the ranges grow, and two is what a
+ * phone gets: the third covers 260–1300 m, which is where aerial perspective
+ * has already taken over, and dropping it also shortens the shadow pass's
+ * terrain re-selection — the vertex cost that dominates this pass.
+ *
+ * Fixed at import time. `shaders/shadowSample.ts` builds one node graph per
+ * cascade and bakes MAP_SIZE into it as a literal, so neither can move once
+ * the shaders exist. See the note on QUALITY about why reading it here is
+ * safe.
+ */
+export const CASCADES = QUALITY.shadowCascades;
 
 /** Shadow map resolution per cascade. */
-export const MAP_SIZE = 2048;
+export const MAP_SIZE = QUALITY.shadowMapSize;
 
 /**
  * Cascade outer radii at ground level, metres. Deliberately tight near the
  * camera — that is where contact shadows read — and coarse beyond, where
  * aerial perspective is already dissolving the detail.
+ *
+ * With two cascades the far one is stretched to 420 m rather than left at 260:
+ * losing the third cascade should cost range, but not that much of it.
  */
-const BASE_RADII = [55, 260, 1300];
+const BASE_RADII = CASCADES >= 3 ? [55, 260, 1300] : [55, 420];
 
 /** Above this altitude shadows contribute nothing and are switched off. */
 export const SHADOW_MAX_ALTITUDE = 14_000;

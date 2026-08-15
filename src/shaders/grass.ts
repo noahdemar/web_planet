@@ -37,7 +37,9 @@ import {
   GRASS_GRID,
   GRASS_H_HI,
   GRASS_H_LO,
+  GRASS_MAX_SLOPE,
   GRASS_RANGE,
+  GRASS_SLOPE_FULL,
   GRASS_SPACING,
   GRASS_WIDTH,
 } from '../planet.js';
@@ -163,9 +165,18 @@ fn grassSample(cell: vec2<f32>, bake: vec4<f32>, bake2: vec4<f32>,
   // difference is what puts steppe where the forest stops. The climate itself
   // was evaluated above, because the height field needed the spectrum from it.
   let temp = tempAt_R(clim.x, h);
+  //
+  // Hard reject above the slope limit rather than only thinning towards it,
+  // matching the canopy scatter. A fade alone leaves the tail of the
+  // distribution standing on ground far past the point anything grows on it,
+  // and those are exactly the blades that show, because steep ground is what
+  // the camera is usually pointed at.
+  if (slope > ${f(GRASS_MAX_SLOPE)}) {
+    return vec4<f32>(0.0, 0.0, 0.0, -1.0);
+  }
   let grow = smoothstep(0.05, 0.22, temp)
            * smoothstep(0.06, 0.28, clim.y)
-           * (1.0 - smoothstep(0.28, 0.55, slope));
+           * (1.0 - smoothstep(${f(GRASS_SLOPE_FULL)}, ${f(GRASS_MAX_SLOPE)}, slope));
   if (j.x * 0.37 + j.y * 0.63 > grow * cfg.w) {
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
   }

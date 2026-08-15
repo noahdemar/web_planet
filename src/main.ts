@@ -8,7 +8,7 @@
 
 import { ACESFilmicToneMapping, PerspectiveCamera, Scene, Vector3 } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import { DEFAULT_LOD_FACTOR, MAX_LEVEL, RADIUS } from './planet.js';
+import { MAX_LEVEL, RADIUS } from './planet.js';
 import { planetSurface, seedFromLocation } from './planetSource.js';
 import { AutoExposure } from './exposure.js';
 import { ALTITUDES, SITES } from './tour.js';
@@ -28,6 +28,7 @@ import { Clouds } from './clouds.js';
 import { CASCADES, CASTER_DEPTH, Shadows } from './shadows.js';
 import { ShadowInspector } from './shadowDebug.js';
 import { createShadowUniforms, makeShadowFactor } from './shaders/shadowSample.js';
+import { AdaptiveResolution, QUALITY } from './quality.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
 
@@ -44,31 +45,120 @@ const GRID_STEPS = [0, 100, 10, 1, 0.1];
  *
  * 2.0 keeps a little of the saving and puts the caster within one level of the
  * receiver almost everywhere. The pass is vertex-bound, so this is the lever
- * to pull back if the shadow pass ever shows up in the frame budget.
+ * to pull back if the shadow pass ever shows up in the frame budget — which is
+ * exactly what the lower tiers do with it, teeth and all. On a phone the teeth
+ * cost less than the frames.
  */
-const SHADOW_LOD_FACTOR = 2.0;
+const SHADOW_LOD_FACTOR = QUALITY.shadowLodFactor;
+
+/**
+ * A startup failure the reader can do something about, as distinct from a bug.
+ *
+ * fatal() prints these without a stack trace on purpose: the stack is the
+ * inside of this file, and what the reader actually needs is a settings page.
+ */
+class StartupError extends Error {}
 
 function fatal(err: unknown): void {
   const box = document.getElementById('err')!;
-  const msg = err instanceof Error ? `${err.message}\n\n${err.stack ?? ''}` : String(err);
+  const msg = err instanceof StartupError
+    ? err.message
+    : err instanceof Error ? `${err.message}\n\n${err.stack ?? ''}` : String(err);
   box.querySelector('div')!.innerHTML =
     `<b>Could not start</b>${msg.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' })[c]!)}`;
   box.style.display = 'flex';
   console.error(err);
 }
 
-async function main(): Promise<void> {
-  if (!('gpu' in navigator)) {
-    throw new Error(
+/**
+ * The one call this file makes into WebGPU.
+ *
+ * The project has no @webgpu/types dependency — three carries its own types
+ * internally — and a structural type for a single method is cheaper than a
+ * devDependency that exists to describe three lines.
+ */
+type GPUProbe = {
+  requestAdapter(options?: { powerPreference?: 'low-power' | 'high-performance' }):
+    Promise<object | null>;
+};
+
+/**
+ * Whether WebGPU can actually produce an adapter, not merely whether the API
+ * is spelled on `navigator`.
+ *
+ * The old check was `'gpu' in navigator` and stopped there, which is the wrong
+ * question on every Chromium fork. Opera, Opera GX, Brave and Vivaldi all ship
+ * the API — Opera has had it on by default since Opera 99, on the Chromium 113
+ * base — so the property is present and the gate passes. What varies is whether
+ * the browser will hand out an *adapter*, and it will not when hardware
+ * acceleration is switched off, when the GPU or driver sits on Chromium's
+ * blocklist, or when the second GPU of a hybrid laptop is asleep.
+ *
+ * three then throws `THREE.WebGPUBackend: Unable to create WebGPU adapter.`,
+ * which reached the error panel with a stack trace attached — telling a reader
+ * whose browser is perfectly capable that they should go and install Chrome.
+ * Asking the question here lets the panel name the actual cause and the page
+ * that fixes it.
+ *
+ * The high-performance request comes first for the same reason quality.ts
+ * exists. On a laptop with both an integrated and a discrete GPU an undefined
+ * power preference is free to return the integrated one, and no amount of
+ * tuning octaves recovers that gap. The fallback to a plain request matters
+ * because a single-GPU machine may legitimately decline the hint.
+ */
+async function requireWebGPU(): Promise<void> {
+  // Opera and Opera GX both carry "OPR/" rather than "Opera", and both are
+  // Chromium, so the settings pages are the opera:// spellings of Chrome's.
+  const opera = /\bOPR\//.test(navigator.userAgent);
+  const scheme = opera ? 'opera' : 'chrome';
+  const where =
+    `  ${scheme}://settings/system  — turn on "Use hardware acceleration when available", then restart\n` +
+    (opera ? `  ${scheme}://flags/#enable-unsafe-webgpu  — only needed below Opera 99\n` : '') +
+    `  ${scheme}://gpu  — look for "WebGPU" under Graphics Feature Status`;
+
+  const gpu = (navigator as { gpu?: GPUProbe }).gpu;
+  if (!gpu) {
+    throw new StartupError(
       'WebGPU is not available in this browser.\n\n' +
-        'M1 needs compute-capable WebGPU — WebGL2 has no compute shaders, and ' +
-        'the bake pipeline at M3 depends on them. Use Chrome 113+, Edge 113+, ' +
-        'or Safari 18+.',
+        'This needs compute-capable WebGPU — WebGL2 has no compute shaders, and ' +
+        'the bake pipeline depends on them. Chrome or Edge 113+, Safari 18+, ' +
+        'Opera 99+, or any current Chromium-based browser will do. Firefox will ' +
+        'not, yet.',
     );
   }
 
+  let adapter: object | null = null;
+  try {
+    adapter =
+      (await gpu.requestAdapter({ powerPreference: 'high-performance' })) ??
+      (await gpu.requestAdapter());
+  } catch (cause) {
+    throw new StartupError(
+      `WebGPU is present in this browser but refused to start.\n\n${String(cause)}\n\n${where}`,
+    );
+  }
+
+  if (adapter === null) {
+    throw new StartupError(
+      'This browser has WebGPU, but could not provide a GPU adapter.\n\n' +
+        'That is almost always hardware acceleration being switched off, or the ' +
+        'GPU sitting on Chromium’s driver blocklist — not a missing feature. ' +
+        'The browser is otherwise capable:\n\n' +
+        where,
+    );
+  }
+}
+
+async function main(): Promise<void> {
+  await requireWebGPU();
+
   const renderer = new WebGPURenderer({
-    antialias: true,
+    antialias: QUALITY.antialias,
+    // Matches the preference requireWebGPU() already probed with. Without it
+    // three requests an adapter with no preference at all, which on a hybrid
+    // laptop is free to come back with the integrated GPU — a bigger swing
+    // than every knob in quality.ts put together.
+    powerPreference: 'high-performance',
     // Real GPU time per pass. CPU-side timing measures queue submission, not
     // work, and every performance decision here has been guesswork without it.
     trackTimestamp: true,
@@ -107,7 +197,13 @@ async function main(): Promise<void> {
     // bought it, and the fix is reversed-Z rather than turning this back on.
     logarithmicDepthBuffer: false,
   });
-  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  // Pixel ratio is owned by the adaptive scaler from here on — it sets the
+  // initial value from the tier's cap in its constructor, then moves it in
+  // steps as the frame clock demands. See quality.ts.
+  const resolution = new AdaptiveResolution((pr) => {
+    renderer.setPixelRatio(pr);
+    renderer.setSize(innerWidth, innerHeight);
+  });
   renderer.setSize(innerWidth, innerHeight);
   renderer.setClearColor(0x000000, 1);
   // The shaders emit radiance, not screen colour, so a tone curve is required
@@ -160,7 +256,7 @@ async function main(): Promise<void> {
     bootStage.textContent = LABEL[stage] ?? stage;
   });
 
-  const selector = new PatchSelector(DEFAULT_LOD_FACTOR);
+  const selector = new PatchSelector(QUALITY.lodFactor);
   selector.setPlanetSurface(surface);
   setPlanetSurface(surface);
   const terrain = new TerrainMesh(selector.buffers, surface, shadowOf);
@@ -190,19 +286,31 @@ async function main(): Promise<void> {
       maxCascadeRadius: i === 0 ? 400 : 2000,
     })),
   ];
-  let shadowsOn = true;
+  let shadowsOn = QUALITY.shadows;
 
   const controls = new FlyControls(renderer.domElement);
   const hud = new Hud(document.getElementById('hud')!);
 
   let mobileControls: MobileControls | undefined;
 
-  let lodFactor = DEFAULT_LOD_FACTOR;
-  let maxLevel = MAX_LEVEL;
+  // Quality state starts from the tier rather than the desktop defaults. The
+  // `[` `]` `,` `.` `-` `=` keys still move all of it at runtime, and still
+  // range up to the desktop ceiling — a tier is a starting point, not a cap.
+  let lodFactor = QUALITY.lodFactor;
+  let maxLevel = QUALITY.maxLevel;
   let gridIdx = 0;
+
+  selector.setMaxLevel(maxLevel);
+  terrain.setOctaves(QUALITY.octaves);
+  vegetation.setEnabled(QUALITY.vegetation);
+  vegetation.setDensity(QUALITY.vegDensity);
+  grass.setEnabled(QUALITY.grass);
 
   addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
+    // setSize re-reads the renderer's pixel ratio, so the scaler's current
+    // step survives a rotation or a URL-bar collapse instead of snapping back
+    // to the tier default.
     renderer.setSize(innerWidth, innerHeight);
   });
 
@@ -274,6 +382,12 @@ async function main(): Promise<void> {
       case 'KeyJ':
         dayRunning = !dayRunning;
         break;
+      case 'Backquote':
+        // The only way back to the readout now that it starts hidden. Backquote
+        // because that is where a debug overlay lives in everything else.
+        hud.toggle();
+        mobileControls?.syncState();
+        break;
       case 'KeyH':
         shadowsOn = !shadowsOn;
         break;
@@ -314,6 +428,16 @@ async function main(): Promise<void> {
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     const dt = Math.min(0.1, (now - prev) / 1000);
+    // Unclamped, unlike `dt`: the scaler wants the frame's true wall time, and
+    // it does its own rejection of the multi-second gaps a backgrounded tab
+    // produces. Clamping here would hide exactly the overruns it exists for.
+    // GPU time from the *previous* frame — timestamps resolve a frame or two
+    // late, which is why the scaler treats a zero as "no reading yet" rather
+    // than as a free frame.
+    resolution.update(
+      now - prev,
+      renderer.info.render.timestamp + renderer.info.compute.timestamp,
+    );
     prev = now;
 
     controls.setTerrain(terrain.octaves, terrain.heightScale);
@@ -413,7 +537,7 @@ async function main(): Promise<void> {
         const far2 = shadows.radii[CASCADES - 1] * (0.65 + Math.SQRT2);
         selector.setDistanceCap(Math.hypot(far2, alt) * 1.08);
         selector.setLodFactor(SHADOW_LOD_FACTOR);
-        selector.setMaxLevel(17);
+        selector.setMaxLevel(QUALITY.shadowMaxLevel);
         selector.setFrustumCull(false);
         const shadowStats = selector.select(
           controls.pos,
@@ -484,6 +608,9 @@ async function main(): Promise<void> {
         fps: 1000 / Math.max(smoothed, 0.01),
         frameMs: smoothed,
         worstMs: Math.max(...window2s),
+        renderScale: resolution.scale,
+        pixelRatio: resolution.pixelRatio,
+        scaleSource: resolution.source,
         altitude: controls.altitude,
         radius: camR,
         speed: controls.speed,
@@ -628,13 +755,18 @@ async function main(): Promise<void> {
     else applySun(sunFromClock());
   };
 
-  mobileControls = new MobileControls({
-    controls,
-    hud,
-    terrain,
-    onToggleSun: toggleSun,
-    onCycleShadeMode: cycleShadeMode,
-  });
+  // Touch UI only where there is touch. It was being built and appended
+  // unconditionally, so every desktop session carried an overlay of buttons it
+  // could not usefully press.
+  if (QUALITY.handheld) {
+    mobileControls = new MobileControls({
+      controls,
+      hud,
+      terrain,
+      onToggleSun: toggleSun,
+      onCycleShadeMode: cycleShadeMode,
+    });
+  }
 
   const exposure = new AutoExposure();
   /** Where sim.tour.next() is up to. */
@@ -698,6 +830,12 @@ async function main(): Promise<void> {
       controls,
       terrain,
       selector,
+      // Driving the camera from the console sets a position but never runs the
+      // frame loop, so the metered value never reaches the renderer and the
+      // shot comes out at whatever exposure the last live frame left. Exposing
+      // it lets a caller apply `renderer.toneMappingExposure = sim.exposure.value`
+      // after a teleport, which is what tour() effectively does a frame later.
+      exposure,
       vegetation,
       sky,
       clouds,

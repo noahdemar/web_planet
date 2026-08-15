@@ -69,15 +69,15 @@ export class MobileControls {
     const topBar = document.createElement('div');
     topBar.className = 'mobile-topbar';
 
-    const hudBtn = this.createButton('📊 HUD', 'Toggle debug HUD', () => {
+    const hudBtn = this.createButton('HUD', 'Toggle debug HUD', () => {
       this.hud.toggle();
     });
 
-    const sunBtn = this.createButton('☀️ Sun', 'Toggle sun cycle / lock', () => {
+    const sunBtn = this.createButton('Sun', 'Toggle sun cycle / lock', () => {
       callbacks.onToggleSun();
     });
 
-    const modeBtn = this.createButton('🎨 Mode', 'Cycle shading modes', () => {
+    const modeBtn = this.createButton('Mode', 'Cycle shading modes', () => {
       callbacks.onCycleShadeMode();
     });
 
@@ -94,11 +94,11 @@ export class MobileControls {
     const flyGroup = document.createElement('div');
     flyGroup.className = 'mobile-flight-group';
 
-    const upBtn = this.createHoldButton('▲ Up', 'Ascend in flight mode', (active) => {
+    const upBtn = this.createHoldButton('Up', 'Ascend in flight mode', (active) => {
       this.controls.verticalInput = active ? 1 : 0;
     });
 
-    const downBtn = this.createHoldButton('▼ Down', 'Descend in flight mode', (active) => {
+    const downBtn = this.createHoldButton('Down', 'Descend in flight mode', (active) => {
       this.controls.verticalInput = active ? -1 : 0;
     });
 
@@ -108,14 +108,14 @@ export class MobileControls {
     this.flyBtnGroup = flyGroup;
 
     // Boost / Sprint button
-    const boostBtn = this.createHoldButton('⚡ Boost', 'Fast travel / Sprint', (active) => {
+    const boostBtn = this.createHoldButton('Boost', 'Fast travel / Sprint', (active) => {
       this.controls.boostInput = active;
       boostBtn.classList.toggle('active-state', active);
     });
     actionCluster.appendChild(boostBtn);
 
     // Walk / Fly toggle button
-    const walkBtn = this.createButton('🚶 Walk', 'Toggle Walk / Flight', () => {
+    const walkBtn = this.createButton('Walk', 'Toggle Walk / Flight', () => {
       this.controls.setWalk(!this.controls.walk);
       this.syncState();
     });
@@ -126,12 +126,12 @@ export class MobileControls {
     const navGroup = document.createElement('div');
     navGroup.className = 'mobile-nav-group';
 
-    const landBtn = this.createButton('📍 Land', 'Jump to rugged surface land', () => {
+    const landBtn = this.createButton('Land', 'Jump to rugged surface land', () => {
       this.controls.gotoRuggedLand();
       this.syncState();
     });
 
-    const orbitBtn = this.createButton('🪐 Orbit', 'Return to space orbit overview', () => {
+    const orbitBtn = this.createButton('Orbit', 'Return to space orbit overview', () => {
       this.controls.reset();
       this.syncState();
     });
@@ -148,11 +148,11 @@ export class MobileControls {
 
   public syncState(): void {
     if (this.controls.walk) {
-      this.walkBtn.textContent = '✈️ Fly';
+      this.walkBtn.textContent = 'Fly';
       this.walkBtn.classList.add('mode-walk');
       this.flyBtnGroup.style.display = 'none';
     } else {
-      this.walkBtn.textContent = '🚶 Walk';
+      this.walkBtn.textContent = 'Walk';
       this.walkBtn.classList.remove('mode-walk');
       this.flyBtnGroup.style.display = 'flex';
     }

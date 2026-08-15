@@ -139,7 +139,13 @@ const nTex = (t: unknown, uv: N): N =>
  * The skirt is the standard cheap answer: a ring of vertices that duplicate
  * the patch border and are pushed radially inward, so any T-junction gap is
  * covered by geometry that is otherwise hidden below the surface. Costs 13%
- * more triangles and removes the failure mode entirely.
+ * more triangles and removes that failure mode entirely.
+ *
+ * It removes only that one. A skirt is depth, and the other way a seam opens
+ * is width: two patches agree about their shared edge analytically and not
+ * bitwise, and a rasteriser leaves a pixel of background between two edges
+ * that differ in the last bits of f32. That is PATCH_BLEED's job, and the two
+ * are not interchangeable — see planet.ts and LESSONS §23.
  *
  * It was, for a while, blamed for two things that were not its fault: holes
  * along coastlines from above, and a picket fence of bright slivers at patch

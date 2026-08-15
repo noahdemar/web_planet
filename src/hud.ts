@@ -9,6 +9,7 @@
  */
 
 import { MAX_LEVEL, MAX_VEG_TILES, RADIUS, gsdAt } from './planet.js';
+import { QUALITY } from './quality.js';
 import type { SelectStats } from './quadtree.js';
 import type { VegStats } from './vegetation.js';
 
@@ -31,6 +32,12 @@ export interface HudState {
   fps: number;
   frameMs: number;
   worstMs: number;
+  /** Live multiplier the adaptive scaler is applying to the tier pixel ratio. */
+  renderScale: number;
+  /** Pixel ratio in use, after that multiplier. */
+  pixelRatio: number;
+  /** Which clock the scaler is steering by: gpu, wall, or probing. */
+  scaleSource: string;
   altitude: number;
   radius: number;
   speed: number;
@@ -75,6 +82,10 @@ export class Hud {
   }
 
   render(s: HudState, now: number): void {
+    // Hidden is hidden: no string building, no innerHTML write. The panel is
+    // off by default now, so this is the common path rather than a corner of
+    // it, and it was rebuilding forty rows of DOM every frame for nobody.
+    if (!this.isVisible()) return;
     // 10 Hz: DOM writes are not free, and this must not perturb what it measures.
     if (now - this.last < 100) return;
     this.last = now;
@@ -94,6 +105,8 @@ export class Hud {
       ${row('gpu render', `${s.gpu.render.toFixed(2)} ms`)}
       ${row('gpu compute', `${s.gpu.compute.toFixed(2)} ms`)}
       ${row('draws / tris', `${s.gpu.drawCalls} · ${fmtCount(s.gpu.triangles)}`)}
+      ${row('quality', `${QUALITY.tier} <span style="opacity:.5">${QUALITY.reason}</span>`)}
+      ${row('render scale', `${s.renderScale.toFixed(2)}× <span style="opacity:.5">dpr ${s.pixelRatio.toFixed(2)} · ${s.scaleSource}</span>`)}
       <div class="sep"></div>
       ${row('altitude', metres(s.altitude))}
       ${row('speed', `${speed(s.speed)} <span style="opacity:.5">×${s.speedMul.toFixed(2)}</span>`)}

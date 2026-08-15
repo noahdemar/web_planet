@@ -103,3 +103,56 @@ export function shaderNoise(x: number, y: number, z: number): number {
  * each saying it must match the one in src/shaders/terrain.ts. Both sides now
  * import them from src/planet.ts, so there is nothing left to keep in sync.
  */
+
+/**
+ * The same field, with its analytic gradient — the mirror of noised_ in
+ * shaders/terrain.ts, and written in that function's 8-corner loop form rather
+ * than the collapsed k0..k7 expansion above.
+ *
+ * The expansion is fine for a value and useless for a derivative: collapsing
+ * the corners into k0..k7 throws away the per-corner gradient vectors, and the
+ * gradient of gradient noise is not the gradient of its trilinear weights
+ * alone — it is `g*W + dot(g,d)*dW` summed over the eight corners, and the
+ * first of those two terms is exactly what the k-form discarded.
+ *
+ * Same hash, same corner order, same quintic as the shader, so the two agree
+ * cell for cell. The `fround` discipline in heightCPU applies to the argument
+ * before it arrives here, which is where the lattice cell is decided.
+ *
+ * Returns [value, d/dx, d/dy, d/dz].
+ */
+export function shaderNoiseD(x: number, y: number, z: number): [number, number, number, number] {
+  const px = Math.floor(x);
+  const py = Math.floor(y);
+  const pz = Math.floor(z);
+  const w = [x - px, y - py, z - pz];
+  const u = w.map((t) => t * t * t * (t * (t * 6 - 15) + 10));
+  // d/dt of the quintic: 30 t^2 (t - 1)^2.
+  const du = w.map((t) => 30 * t * t * (t * (t - 2) + 1));
+
+  let acc = 0;
+  const grad = [0, 0, 0];
+  for (let k = 0; k < 8; k++) {
+    const o = [k & 1, (k >> 1) & 1, (k >> 2) & 1];
+    hash33(px + o[0], py + o[1], pz + o[2]);
+    const g = [-1 + (2 * h[0]) / U32, -1 + (2 * h[1]) / U32, -1 + (2 * h[2]) / U32];
+    const d = [w[0] - o[0], w[1] - o[1], w[2] - o[2]];
+    const tw = [
+      o[0] ? u[0] : 1 - u[0],
+      o[1] ? u[1] : 1 - u[1],
+      o[2] ? u[2] : 1 - u[2],
+    ];
+    const dtw = [
+      (o[0] * 2 - 1) * du[0],
+      (o[1] * 2 - 1) * du[1],
+      (o[2] * 2 - 1) * du[2],
+    ];
+    const wgt = tw[0] * tw[1] * tw[2];
+    const dg = g[0] * d[0] + g[1] * d[1] + g[2] * d[2];
+    acc += dg * wgt;
+    grad[0] += g[0] * wgt + dg * (dtw[0] * tw[1] * tw[2]);
+    grad[1] += g[1] * wgt + dg * (tw[0] * dtw[1] * tw[2]);
+    grad[2] += g[2] * wgt + dg * (tw[0] * tw[1] * dtw[2]);
+  }
+  return [acc, grad[0], grad[1], grad[2]];
+}

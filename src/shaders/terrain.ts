@@ -51,6 +51,7 @@ import {
   BIOME_GAIN,
   BAND_FADE_HI,
   BAND_FADE_LO,
+  EROSION_K,
   BIOME_LACUNARITY,
   CHANNEL_DEPTH,
   DEFAULT_OCTAVES,
@@ -82,6 +83,15 @@ import {
   RELIEF_SLOPE_LO,
   LOCAL_PERIOD,
   MIN_NOISE_LAMBDA,
+  WATER_ROUGH,
+  WAVE_ANISO,
+  WAVE_CAP,
+  WAVE_CELLS0,
+  WAVE_DEEP,
+  WAVE_FALLOFF,
+  WAVE_OCTAVES,
+  WAVE_SLOPE,
+  PATCH_BLEED,
   RADIUS,
   RIDGE_MEAN,
   SHORE_FLAT_FLOOR,
@@ -628,6 +638,119 @@ fn noiseL_${sfx}(x: vec3<f32>, mask: i32) -> f32 {
   }
   return acc;
 }
+
+// The same field, with its analytic gradient. Waves need the slope and only
+// incidentally the height, and four extra taps to difference it would be four
+// times the cost of carrying the derivative that the interpolation already
+// implies. Returns (value, d/dx, d/dy, d/dz), the gradient in the units of the
+// *input* — so a caller sampling at p/lam gets a dimensionless slope, which is
+// the quantity a normal is built from.
+//
+// u is the quintic 6t^5-15t^4+10t^3, so du is 30t^2(t-1)^2. Getting that
+// derivative wrong is invisible in still water and unmistakable the moment it
+// moves, because the error is a fixed pattern the waves then slide underneath.
+fn noiseLd_${sfx}(x: vec3<f32>, mask: i32) -> vec4<f32> {
+  let i = floor(x);
+  let w = x - i;
+  let u = w * w * w * (w * (w * 6.0 - 15.0) + 10.0);
+  let du = 30.0 * w * w * (w * (w - 2.0) + 1.0);
+  let c = vec3<i32>(i);
+  var acc = 0.0;
+  var grad = vec3<f32>(0.0);
+  for (var k = 0; k < 8; k = k + 1) {
+    let oi = vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+    let og = vec3<f32>(oi);
+    let g = hashL_${sfx}(c + oi, mask);
+    let d = w - og;
+    let tw = mix(vec3<f32>(1.0) - u, u, og);
+    let dtw = (og * 2.0 - 1.0) * du;
+    let wgt = tw.x * tw.y * tw.z;
+    let dwgt = vec3<f32>(dtw.x * tw.y * tw.z,
+                         tw.x * dtw.y * tw.z,
+                         tw.x * tw.y * dtw.z);
+    let dg = dot(g, d);
+    acc = acc + dg * wgt;
+    grad = grad + g * wgt + dg * dwgt;
+  }
+  return vec4<f32>(acc, grad);
+}
+`;
+}
+
+/**
+ * Wave normal, and the slope the pixel is too coarse to resolve.
+ *
+ * Returns `(n.xyz, variance)`: the perturbed surface normal, and the mean
+ * square slope of every octave the pixel footprint swallowed. The second half
+ * is not a leftover — it is the half that makes distant water look like water.
+ * An octave finer than a pixel cannot be drawn, but it has not gone anywhere;
+ * it is still roughening the surface, and the correct place to put it is the
+ * specular lobe. Dropping it instead is what makes CG oceans turn to glass at
+ * range and then crawl with aliasing when the camera moves.
+ *
+ * Sampling is isotropic 3D noise on the period lattice, deliberately. A 2D
+ * parameterisation of a sphere has to come from somewhere — cube face, lat/lon
+ * — and every one of them distorts or seams. Evaluating a 3D field at the
+ * surface point has neither problem, costs the same, and the gradient projects
+ * onto the tangent plane to give exactly the slope wanted.
+ *
+ * Animation is pure translation along the wind, which is the one transform the
+ * period wrap tolerates: the camera crossing a boundary still shifts the
+ * coordinate by a whole number of cells. Each rung translates at its own deep
+ * water phase speed, c = sqrt(g*lambda/2*pi), so the 128 m swell runs at 14 m/s
+ * and the half-metre chop at 0.9. That spread is most of what separates water
+ * in motion from a scrolling texture, and it is free — it is one square root of
+ * a constant per octave.
+ *
+ * The advection distance `c*t` grows without bound, and it cannot be wrapped:
+ * the lattice is periodic per *axis*, so a translation of one period along an
+ * arbitrary wind direction is not a period of the field. It degrades slowly and
+ * gracefully — the finest rung keeps about a hundredth of a cell after a day of
+ * uptime — and the cloud field on the same clock has the same property. Worth
+ * knowing before someone leaves a kiosk running for a week.
+ */
+export function waveBlock(s: string): string {
+  return /* wgsl */ `
+fn waveField_${s}(pLocal: vec3<f32>, up: vec3<f32>, wind: vec3<f32>,
+                  t: f32, mPerPx: f32, depth: f32) -> vec4<f32> {
+  // Shoaling, standing in for fetch — see WAVE_DEEP.
+  let deep = smoothstep(0.0, ${f(WAVE_DEEP)}, depth);
+  if (deep <= 0.002) {
+    return vec4<f32>(up, 0.0);
+  }
+
+  var slope = vec3<f32>(0.0);
+  var lost = 0.0;
+  var amp = ${f(WAVE_SLOPE)};
+  var cells = ${WAVE_CELLS0};
+
+  for (var i = 0; i < ${WAVE_OCTAVES}; i = i + 1) {
+    let lam = ${f(LOCAL_PERIOD)} / f32(cells);
+    // Deep-water dispersion. 0.15915494 is 1/(2*pi).
+    let c = sqrt(9.81 * lam * 0.15915494);
+    // The same footprint fade the ground detail uses, so a rung leaves the
+    // geometry and enters the roughness at one consistent threshold.
+    let w = 1.0 - smoothstep(lam * 0.6, lam * 2.5, mPerPx);
+    if (w > 0.004) {
+      let q = (pLocal - wind * (c * t)) / lam;
+      let g = noiseLd_${s}(q, cells - 1);
+      slope = slope + g.yzw * (amp * w);
+    }
+    // Everything the footprint took, kept as variance rather than discarded.
+    let miss = 1.0 - w;
+    lost = lost + amp * amp * miss * miss;
+    amp = amp * ${f(WAVE_FALLOFF)};
+    cells = cells * 4;
+  }
+
+  // Only the tangential part is surface slope; the radial part is the field
+  // varying with altitude, which a water surface does not do.
+  let st = (slope - up * dot(slope, up)) * deep;
+  // Anisotropy on the gradient rather than the sample coordinate — see
+  // WAVE_ANISO for why that distinction is load-bearing here.
+  let stA = st + wind * (dot(st, wind) * ${f(WAVE_ANISO)});
+  return vec4<f32>(normalize(up - stA), lost * deep * deep);
+}
 `;
 }
 
@@ -735,6 +858,11 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
 
   var mAmp = 1.0; var mFrq = ${f(AMP_F0)}; var mSum = 0.0;
   var mG = vec3<f32>(0.0); var mSq = 0.0; var mBias = 0.0;
+  // Erosion accumulator: the same derivative sum as mG but without the
+  // frequency factor, which keeps it O(1) instead of O(2^octaves). See
+  // EROSION_K. Separate from mG because mG is the surface normal and must stay
+  // the true gradient.
+  var mE = vec3<f32>(0.0);
   // The reference ladder, walked alongside. Its two norms are what this
   // point's ladder is rescaled to — see the normaliser below.
   var rAmp = 1.0; var rSum = 0.0; var rSq = 0.0;
@@ -750,13 +878,18 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
       let n = noised_${s}(dir * mFrq + vec3<f32>(f32(i) * 7.77));
       let sg = select(-1.0, 1.0, n.x >= 0.0);
       let r = 1.0 - abs(n.x);
-      mSum  = mSum + w * mAmp * r * r;
-      mG    = mG - w * mAmp * 2.0 * r * sg * mFrq * n.yzw;
+      // Erosion: damp this octave by the slope the coarser ones already built.
+      // Evaluated from the accumulator *before* this octave contributes, so the
+      // first rung is never damped by itself.
+      let ero = 1.0 / (1.0 + ${f(EROSION_K)} * dot(mE, mE));
+      mSum  = mSum + w * mAmp * r * r * ero;
+      mG    = mG - w * mAmp * 2.0 * r * sg * mFrq * n.yzw * ero;
+      mE    = mE - w * mAmp * 2.0 * r * sg * n.yzw;
       // r² has a positive mean, so the octaves that are switched on would
       // otherwise raise the ground by an amount that changes with distance —
       // moving the coastline as you fly toward it. Track the bias of exactly
       // the octaves in play and remove it.
-      mBias = mBias + w * mAmp * ${f(RIDGE_MEAN)};
+      mBias = mBias + w * mAmp * ${f(RIDGE_MEAN)} * ero;
     }
     // Unweighted: the normalisers must not change with the band limit.
     mSq = mSq + mAmp * mAmp;
@@ -1074,7 +1207,12 @@ const ARGS = `gpos: vec2<f32>, gpar: vec3<f32>,
 const UNPACK = `
   let A = iCenter.x;
   let B = iCenter.y;
-  let hs = iCenter.z;
+  // Half-size, widened by PATCH_BLEED so neighbouring patches overlap by a
+  // hair instead of meeting on an edge the two of them round differently.
+  // Scaled here, once, so every consumer of hs — the offset, the morph
+  // distance, the band limit, the skirt depth — describes the geometry that
+  // is actually drawn.
+  let hs = iCenter.z * ${f(1 + PATCH_BLEED)};
   let dirC = iDirLen.xyz;
   let lenPc = iDirLen.w;
   let anchorRel = iAnchor.xyz;
@@ -1704,15 +1842,52 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // colour, which is why the mid distance read as painted however good the
   // silhouette was.
   //
-  // Two fixed wavelengths, 140 m and 430 m: the scale of a stand of trees, a
-  // patch of scrub, a change of soil. Fixed rather than pixel-derived because
-  // these are real features of the ground and should stay put as you approach;
-  // faded only once a pixel is wider than the feature, which is the ordinary
-  // anti-aliasing condition and does not bite until ~30 km.
-  let mFade = 1.0 - smoothstep(24.0, 90.0, mPerPx);
+  // Three fixed wavelengths — 140 m, 430 m, 1.6 km: a stand of trees, a patch
+  // of scrub, a change of soil, a whole valley side. Fixed rather than
+  // pixel-derived because these are real features of the ground and should
+  // stay put as you approach.
+  //
+  // **Each rung fades on its own Nyquist**, which is the fix. All three used
+  // to share one threshold that closed at mPerPx 90, and a single threshold
+  // for wavelengths an order of magnitude apart can only ever be wrong at both
+  // ends: it held the 140 m rung far past the point it was aliasing, and it
+  // switched off the 430 m rung while it was still eleven pixels wide. Worse,
+  // it meant the entire middle scale was gone above about 45 km altitude —
+  // exactly the range the planet is most often looked at from, and exactly
+  // where the ground was reading as flat colour. A rung is drawn while it is
+  // wider than a pixel and fades over the octave after that; nothing else.
+  //
+  // The 1.6 km rung is new and does the most work of the three from altitude:
+  // it is the scale at which real ground stops being a texture and starts
+  // being a place.
   let mA = noised_T(up * (${f(RADIUS)} / 140.0) + vec3<f32>(71.3)).x;
   let mB = noised_T(up * (${f(RADIUS)} / 430.0) + vec3<f32>(17.9)).x;
-  let meso = (mA * 0.45 + mB * 0.55) * mFade;
+  let mC = noised_T(up * (${f(RADIUS)} / 1600.0) + vec3<f32>(43.1)).x;
+  let fA = 1.0 - smoothstep(70.0, 210.0, mPerPx);
+  let fB = 1.0 - smoothstep(215.0, 645.0, mPerPx);
+  let fC = 1.0 - smoothstep(800.0, 2400.0, mPerPx);
+  let mesoN = max(fA * 0.34 + fB * 0.40 + fC * 0.46, 1e-3);
+  let mesoRaw = (mA * 0.34 * fA + mB * 0.40 * fB + mC * 0.46 * fC) / mesoN;
+
+  // Tied to the landform, not merely laid over it.
+  //
+  // Position noise alone puts a patch of greener, wetter-looking ground across
+  // a ridge and a gully with equal indifference, and that indifference is the
+  // whole tell — it is what makes the mottling read as paint rather than as
+  // material. Real cover does not work that way: soil and plants collect on
+  // gentle ground and are stripped off steep ground, continuously, everywhere,
+  // which is why a hillside reads as bare at the top of the slope and vegetated
+  // at the foot of it without anything having drawn that boundary.
+  //
+  // So the field is mixed with slope rather than replaced by it. All landform
+  // and the planet is banded like a contour map; all noise and it is the
+  // painted look this replaces. A little under half is where the patches start
+  // following the ground while still having a shape of their own.
+  // Plain slope, not the grain-perturbed slopeB: that form is not declared
+  // until below this block and WGSL has no hoisting. The perturbation is a
+  // sub-metre wobble anyway, the wrong scale to shape a 1.6 km patch with.
+  let landform = (1.0 - smoothstep(0.06, 0.34, slope)) * 2.0 - 1.0;
+  let meso = mix(mesoRaw, landform, 0.45);
 
   // Loose material collects in hollows and is stripped off convexities, so the
   // same field that mottles the colour also says where soil should be. Sign is
@@ -1733,13 +1908,38 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
     // previous version multiplied sun irradiance by Fresnel directly, so at
     // grazing angles — i.e. most of any ocean view — it blew out to white.
     let v = normalize(-rel);
+
+    // The wave field. Zonal wind: crests running north-south on an eastward
+    // trade is the commonest thing an ocean does, and deriving the direction
+    // from the local frame costs one cross product and needs no extra state.
+    // Degenerate at the poles, where any tangent will do, so the fallback is
+    // arbitrary rather than careful.
+    var eastW = cross(vec3<f32>(0.0, 1.0, 0.0), up);
+    let eLen = length(eastW);
+    eastW = select(vec3<f32>(1.0, 0.0, 0.0), eastW / max(eLen, 1e-6), eLen > 1e-4);
+    let wave = waveField_T(rel + snap, up, eastW, cfg3.w, mPerPx, depth);
+    let n = wave.xyz;
+
+    // Fresnel against the wave normal, not the sphere normal. This is the term
+    // that carries most of the change: a flat surface has one Fresnel value
+    // across the whole ocean and therefore one flat sheet of reflectivity,
+    // which is exactly the look the waves are here to break up.
     let f0 = 0.02;
-    let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(v, up), 0.0, 1.0), 5.0);
+    let fres = f0 + (1.0 - f0) * pow(1.0 - clamp(dot(v, n), 0.0, 1.0), 5.0);
 
     // Actually sample the sky in the mirror direction. A constant blue is the
     // reason CG oceans read as plastic: real water is bright at the horizon
     // and dark overhead purely because of what it reflects.
-    let refl = reflect(-v, up);
+    var refl = reflect(-v, n);
+    // A perturbed normal can throw the mirror ray below the local horizon at
+    // grazing incidence, and there is no sky down there — skyRadiance would be
+    // asked about the inside of the planet. Folding it back above the tangent
+    // plane is also what a wave that steep actually shows: the sky-lit back of
+    // the next crest, which is near-horizon coloured anyway.
+    let rUp = dot(refl, up);
+    if (rUp < 0.0) {
+      refl = normalize(refl - up * (2.0 * rUp));
+    }
     var skyRefl = skyRadiance_T(wp, refl, sd, Rg, sunCol);
 
     // At range the mirror has to give way to the average sky.
@@ -1759,11 +1959,19 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
     let dRough = smoothstep(400.0, 5000.0, length(rel));
     skyRefl = mix(skyRefl, skyRadiance_T(wp, up, sd, Rg, sunCol), dRough * 0.85);
 
-    // Sun glint as a GGX lobe on a slightly rough surface, not a fixed power.
+    // Sun glint as a GGX lobe whose roughness is *measured*, not chosen.
+    //
+    // The base is capillary ripple the field never resolves at any distance;
+    // added to it, in quadrature, is the mean square slope of every wave octave
+    // the pixel footprint swallowed. So the lobe widens exactly as fast as the
+    // geometry it replaces disappears, and the sun's reflection goes from a
+    // tight blob a few metres away to the long glitter path an ocean shows at
+    // range — continuously, and without ever aliasing, because the detail is
+    // never dropped, only moved from the normal into the roughness.
     let hv = normalize(v + sd);
-    let rough = 0.062;
+    let rough = sqrt(${f(WATER_ROUGH)} * ${f(WATER_ROUGH)} + wave.w);
     let a2 = rough * rough * rough * rough;
-    let nh = max(dot(up, hv), 0.0);
+    let nh = max(dot(n, hv), 0.0);
     let dd = nh * nh * (a2 - 1.0) + 1.0;
     let ggx = a2 / (3.14159265 * dd * dd);
 
@@ -1792,10 +2000,24 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
     var wc = mix(sub, skyRefl, fresD)
            + sunCol * sunTrW * ggx * fresD * sunUpW * shadow * cloudLit;
 
-    // Surf line where the sea meets land. Crude — a depth band, no waves — but
-    // a coastline with no tonal change at all reads as a paint boundary.
-    let surf = (1.0 - smoothstep(0.0, 6.0, depth)) * smoothstep(0.0, 1.5, depth);
-    wc = mix(wc, wc + sunCol * sunTrW * 0.035 * shadow * cloudLit, surf);
+    // Foam: whitecaps offshore, surf at the shoreline.
+    //
+    // Not painted on. It keys on the same slope the normal was built from, so
+    // caps sit on the faces of the steepest crests and travel with them at the
+    // crests' own speed, for no sampling cost at all — the slope is already in
+    // hand. The shoreline band is still a depth band, but modulating it by the
+    // same steepness makes the waterline ragged and moving rather than a
+    // contour drawn around the land.
+    let steep = length(n - up * dot(n, up));
+    let deepW = smoothstep(0.0, ${f(WAVE_DEEP)}, depth);
+    let cap = smoothstep(${f(WAVE_CAP)}, ${f(WAVE_CAP)} * 1.9, steep) * deepW;
+    let shore = (1.0 - smoothstep(0.0, 6.0, depth)) * smoothstep(0.0, 1.5, depth);
+    let foam = clamp(max(cap, shore * (0.55 + 1.7 * steep)), 0.0, 1.0);
+    // Foam is a dense rough scatterer, so it has to *take the mirror away* as
+    // well as add white. Adding brightness over the top of an intact reflection
+    // is what makes CG foam read as a decal lying on the water.
+    let foamLit = sunCol * sunTrW * sunUpW * shadow * cloudLit * 0.30 + skyAmb * 1.7;
+    wc = mix(wc, foamLit, foam * 0.85);
 
     // Aerial perspective is applied once, at the end, to the blended colour.
     // aerial_ is "colour * transmittance + inscatter" — affine in the
@@ -2031,11 +2253,17 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // the patchiness; steep ground has shed it along with its soil.
   let mesoWet = clamp(moistB + meso * 0.10 * (1.0 - smoothstep(0.20, 0.50, slopeB)),
                       0.0, 1.0);
-  alb = mix(alb, mix(alb, savanna, 0.55), clamp(-meso, 0.0, 1.0) * 0.22
+  // Strengthened along with the fade fix. 0.22/0.26/0.07 was calibrated when
+  // the field was only ever seen from a hillside, where the grain and the fine
+  // ladder are both still live and doing most of the work; from altitude they
+  // are gone and this is the only thing left carrying variation, so at the old
+  // weights the ground went flat. Still deliberately under half: past that the
+  // mottling stops reading as soil and starts reading as cloud shadow.
+  alb = mix(alb, mix(alb, savanna, 0.55), clamp(-meso, 0.0, 1.0) * 0.30
                                           * (1.0 - smoothstep(0.34, 0.58, mesoWet)));
-  alb = mix(alb, mix(alb, temperate, 0.55), clamp(meso, 0.0, 1.0) * 0.26
+  alb = mix(alb, mix(alb, temperate, 0.55), clamp(meso, 0.0, 1.0) * 0.34
                                             * smoothstep(0.20, 0.46, mesoWet));
-  alb = alb * (1.0 + meso * 0.07);
+  alb = alb * (1.0 + meso * 0.13);
   alb = mix(alb, scree, clast * smoothstep(0.10, 0.34, slopeB)
                         * (1.0 - smoothstep(0.30, 0.60, moist)) * 0.40);
 
@@ -2104,6 +2332,7 @@ ${atmosphere('T')}
 ${lapseBlock('T')}
 ${closureBlock('T')}
 ${localNoiseBlock('T')}
+${waveBlock('T')}
 ${biomeBlock('T')}
 ${cloudFieldBlock('T')}
 `);

@@ -717,9 +717,75 @@ after the second one fails.
 
 ---
 
-## 23. Still open
+## 23. Agreeing analytically is not agreeing bitwise
 
-- **The dark quadrilaterals are not fixed.** The two selection bugs in §22
+The terrain split at the seams near the ground. At 49 m over a flat playa every
+patch boundary drew a hairline of background straight through the mesh, thin
+black lines running out toward the horizon and widening into wedges at grazing
+angles. `sim.audit()` put it at **0.54213%** of terrain pixels; it read 0.000%
+when M1 shipped.
+
+Everything about the geometry checked out, in this order:
+
+- The selection is a partition. No missing tile anywhere near the camera — the
+  nearest neighbour it could not find was 5.4 km away, at the frustum edge —
+  and no neighbour more than one level apart, max jump 1 over 2 844 edges.
+- Every fine edge facing a coarser neighbour is *fully* morphed: `mk` is
+  exactly 1 at all 363 of them, so there is no T-junction open anywhere.
+- The shared-edge vertices agree. Emulating the shader's f32 against the real
+  instance data — 456 same-level pairs × 33 vertices — the worst disagreement
+  is 1.1 mm at level 12 and **0.00 mm at the levels that were cracking**.
+- The drawn elevation either side of a crack is identical to the byte (mode 7
+  readback: 119.4 m on both sides), so it is not a step in the surface.
+- Octave count 8–14, shadows, clouds, grass and vegetation each change nothing.
+  Hiding every mesh but the terrain changes nothing: 6 992 pixels either way.
+
+The mesh is continuous. The **rasteriser is not obliged to care**. A fill rule
+guarantees watertight coverage only across edges that are *identical*; two
+edges that differ in the last bits of f32 are two edges, and along the stretch
+where they diverge outward the pixel centres between them lie inside neither
+triangle. Microns of disagreement, one pixel of hole — but per seam, along
+every seam, which is why it reads as the terrain splitting rather than as
+noise.
+
+The disagreement is not a bug to be fixed. The precision architecture (SPEC I4)
+exists to have each patch reconstruct its vertices from *its own* anchor, its
+own warped centre and its own tangent-addition delta. Two patches cannot
+produce bit-identical results for a shared vertex without sharing the
+arithmetic, and not sharing it is the whole point.
+
+So the fix is on the scale of the problem: `PATCH_BLEED`, an overlap of 1e-5 of
+a patch applied to the half-size once at unpack. Neighbours overlap by a hair
+instead of meeting on an edge they round differently. The overlap is a
+*fraction of the patch*, and a patch's screen size is bounded by the LOD rule,
+so it stays under a hundredth of a pixel at every level and every altitude —
+and both patches evaluate the same height field at the same direction inside
+the sliver, so it is the same surface drawn twice rather than two surfaces to
+z-fight. Measured over 12 sites and altitudes from 3 m to 8 000 km and
+lodFactor 1.0 to 4.4: **0.54213% → 0.00000%**.
+
+Why the skirt did not already cover it: a skirt is *depth*, and this gap is
+*width*. Deepening it 8× also drove the audit to zero, which is what made this
+look like a skirt problem — but 8× / 16× / 64× the depth gives 6 992 / 1 567 /
+0 crack pixels, and a curve like that is a curtain being drawn further across
+the symptom, not a cause being removed. It would also have cost 8× the false
+occluder in the shadow map. The skirt is still load-bearing for the class it
+was built for: with the bleed in and the skirt taken out entirely, the audit
+reads 30 pixels of *vertical* mismatch. Both stay.
+
+**Rule:** when two pieces of geometry have to meet exactly and each computes
+its own position, they will not meet exactly. Share the arithmetic or overlap
+them deliberately — never rely on two f32 paths agreeing to the last bit
+because they agree on paper.
+
+---
+
+## 24. Still open
+
+- **The dark quadrilaterals are not fixed.** Unrelated to §23 and still there
+  once the seams were closed: the same flat playa at a low sun draws broad
+  soft-edged bands that vanish the moment shadows are switched off with `H`.
+  The two selection bugs in §22
   fixed the *lit* class and the 3 km lake artefact with it. Flat ground under a
   low sun still shows large dark bands with straight edges and right-angle
   corners — reproduce with `sim.tour('valley', 700, 28, 130)`, which is a plain

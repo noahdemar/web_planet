@@ -375,11 +375,14 @@ export class FlyControls {
     const joyY = this.joyActive ? this.joy.y : 0;
     const fwd = (k.has('KeyW') ? 1 : 0) - (k.has('KeyS') ? 1 : 0) - joyY;
     const str = (k.has('KeyD') ? 1 : 0) - (k.has('KeyA') ? 1 : 0) + joyX;
+    // Shift boosts, Ctrl descends. The other way round is the more common
+    // flight-sim assignment, but Shift-to-sprint is what every game that has a
+    // sprint uses, and the hand is already there.
     const vert = this.walk
       ? 0
-      : (k.has('Space') ? 1 : 0) - (k.has('ShiftLeft') || k.has('ShiftRight') ? 1 : 0) + this.verticalInput;
+      : (k.has('Space') ? 1 : 0) - (k.has('ControlLeft') || k.has('ControlRight') ? 1 : 0) + this.verticalInput;
 
-    const running = k.has('ControlLeft') || k.has('ControlRight') || this.boostInput;
+    const running = k.has('ShiftLeft') || k.has('ShiftRight') || this.boostInput;
     const boost = running ? (this.walk ? RUN_MULTIPLIER : 8) : 1;
     const v = this.speed * boost * dt;
 

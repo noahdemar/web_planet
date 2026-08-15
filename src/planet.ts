@@ -3,7 +3,13 @@
  *
  * All lengths in metres. All world-space arithmetic happens in JS numbers,
  * which are IEEE f64 — that is deliberate and load-bearing (SPEC.md I4).
+ *
+ * Everything here describes the *planet* and is the same on every device. The
+ * one exception is VEG_BAND_CAPACITY, which sizes a buffer rather than
+ * describing the world — see the note on it.
  */
+
+import { QUALITY } from './quality.js';
 
 export const RADIUS = 6_371_000;
 
@@ -555,8 +561,158 @@ export const SHORE_FLAT_FLOOR = 0.08;
  * Vertices per patch edge. 33 → 32 segments, 2048 triangles per patch.
  * Must be odd so the CDLOD parent grid is a strict subset (SPEC.md §6).
  */
+/**
+ * Water waves — a normal field, not geometry.
+ *
+ * The water surface here is not its own mesh: it is the terrain mesh shaded as
+ * water wherever the waterline sits above the ground, which is what lets the
+ * shoreline resolve per pixel instead of along a seam. So displacing vertices
+ * the way a Gerstner ocean does is not available, and it is also not where the
+ * realism is. Almost everything that reads as "water" at any distance beyond
+ * arm's reach is *specular*: how the sky breaks up in it and how the sun
+ * scatters into a glitter path. Both are functions of the surface normal, so a
+ * normal field buys nearly all of it at none of the structural cost.
+ *
+ * The wavelengths are rungs of the LOCAL_PERIOD lattice — see localNoiseBlock.
+ * That is what keeps the field seamless when the camera crosses a period
+ * boundary, and it is why the octaves step by 4 rather than 2: they have to be
+ * whole power-of-two divisions of the period or the wrap stops being exact.
+ * WAVE_CELLS0 = 32 puts the longest rung at 4096/32 = 128 m, a plausible ocean
+ * swell, and five octaves reach 0.5 m ripples.
+ */
+/**
+ * Strength of the erosion feedback in the amplification fBm.
+ *
+ * Each octave is divided by `1 + EROSION_K * |sum of gradients so far|^2`, so
+ * fine detail is suppressed wherever the coarser octaves have already produced
+ * a steep face. That single term is the difference between a ridged fBm and an
+ * *eroded* one: without it every octave contributes at full strength
+ * everywhere, which is uniform lumpiness in all directions — the cauliflower
+ * the 50 km survey shows. With it, detail survives on flats and shoulders and
+ * is stripped from steep ground, which produces smooth valley floors, sharp
+ * ridgelines, and structure that aligns to the slope instead of blobbing.
+ *
+ * The accumulator is deliberately *not* the same one the normal uses. That one
+ * carries the frequency factor and so grows by a factor of two an octave,
+ * reaching ~1e5 by the last rung; squaring it would make the divisor explode
+ * and flatten the planet. This one drops the frequency, which leaves it O(1) —
+ * the sum of the amplitude ladder — and therefore scale-free and safe to tune.
+ *
+ * Measured, against the pre-erosion baseline: at 1.15 it halves the planet
+ * (broadleaf-steep 5 km relief 1076 -> 511 m, steppe-steep slope@3m 0.40 ->
+ * 0.04), which is flattening rather than eroding. 0.15 costs 10-20% of relief
+ * and keeps the slope growth ratios close to where they were — 3.45 -> 3.2 at
+ * broadleaf-steep — while still stripping the fine octaves off steep faces,
+ * which is the structure this exists for.
+ *
+ * The relief that is lost is a normaliser artefact, not a property of erosion:
+ * mNorm is built from the *undamped* amplitude ladder, so damping mSum lowers
+ * the total instead of redistributing it. Folding the eroded amplitudes into
+ * the normaliser would let this run harder at no cost in relief, and is the
+ * obvious next move on it.
+ */
+export const EROSION_K = 0.15;
+
+export const WAVE_CELLS0 = 32;
+export const WAVE_OCTAVES = 5;
+
+/**
+ * RMS slope of the longest rung, and the per-octave falloff.
+ *
+ * Slope rather than amplitude because slope is the only thing a normal field
+ * can express, and it is the quantity that stays roughly constant across the
+ * saturated part of a wind-sea spectrum. Open ocean sits near 0.1–0.2 RMS
+ * total; too much reads as a storm at every latitude, too little as varnish.
+ */
+export const WAVE_SLOPE = 0.105;
+export const WAVE_FALLOFF = 0.82;
+
+/**
+ * How much steeper the field is along the wind than across it.
+ *
+ * Applied to the *gradient*, never to the sample coordinate. Stretching the
+ * coordinate is the usual way to get anisotropy and it cannot be used here:
+ * the period lattice is axis-aligned, and any transform that is not a uniform
+ * scale rotates the 4096 m wrap out of alignment with the cell grid and puts a
+ * seam on every period boundary. Shaping the gradient afterwards costs one
+ * multiply-add, keeps the wrap exact, and gives the same visual result — crests
+ * reading as though they run across the wind.
+ */
+export const WAVE_ANISO = 0.55;
+
+/**
+ * Depth over which waves reach full height, metres.
+ *
+ * Standing in for fetch. Real waves shoal and break as the bottom comes up, and
+ * a puddle in a valley floor has no swell on it whatever the wind does — so
+ * tying amplitude to depth suppresses waves on ponds and shallows without
+ * needing to know which body of water is which.
+ */
+export const WAVE_DEEP = 22;
+
+/**
+ * Base roughness of the water microsurface, before wave slope is added.
+ *
+ * This is the roughness of what the wave field cannot resolve at any distance —
+ * capillary ripple below the finest rung. Sub-pixel wave slope is added to it
+ * in quadrature, which is what turns the sun's reflection from a single blob up
+ * close into a long glitter path at range instead of aliasing away.
+ */
+export const WATER_ROUGH = 0.055;
+
+/**
+ * Surface slope at which water starts to break into whitecaps.
+ *
+ * A threshold rather than a proportion, because whitecapping is a breaking
+ * criterion: water is either steep enough to break or it is not, and foam that
+ * fades smoothly in with steepness reads as dirt on the lens. Sits above the
+ * field's RMS slope so caps are occasional — the state of a moderate sea, not
+ * a storm at every latitude.
+ */
+export const WAVE_CAP = 0.2;
+
 export const PATCH_VERTS = 33;
 export const PATCH_SEGS = PATCH_VERTS - 1;
+
+/**
+ * Fractional overlap between neighbouring patches — the lateral half of the
+ * skirt. Each patch is drawn `1 + PATCH_BLEED` times its own half-size, so
+ * adjacent patches overlap instead of meeting exactly.
+ *
+ * Two patches sharing an edge agree about it *analytically*, and they must:
+ * the whole precision architecture exists so a vertex reconstructed from one
+ * patch's anchor lands where the neighbour's does. What they cannot do is
+ * agree *bitwise*. Each side reconstructs the shared vertex from its own
+ * anchor, its own warped centre and its own tangent-addition delta, all in
+ * f32, so the two results differ by a few ULPs — microns of ground, and
+ * nothing at all against the ~3e-5 of sample spacing tools/precision.ts
+ * measures.
+ *
+ * A rasteriser does not care that the disagreement is microscopic. Its fill
+ * rule guarantees seamless coverage only for edges that are *identical*; two
+ * edges that differ in the last bits are two edges, and along the stretch
+ * where they diverge outward the pixel centres between them belong to neither
+ * triangle. That is a one-pixel hole per seam, following the patch boundary,
+ * and it is why the seam is visible as a hairline crack near the ground where
+ * the mesh is finest and the seams are longest on screen. sim.audit() counted
+ * 0.54% of terrain pixels at 49 m. The skirt only ever hid part of it — 8×,
+ * 16× and 64× the skirt depth measure 6992, 1567 and 0 crack pixels, which is
+ * a curtain being drawn further across the symptom rather than a cause being
+ * removed. A skirt is depth; this gap is width.
+ *
+ * The overlap is a *fraction of the patch*, so it stays the same fraction of
+ * a pixel at every level: a patch never spans more than ~10^3 px, which puts
+ * the overlap under 10^-2 px everywhere. Coincident surfaces cannot z-fight
+ * across a sliver that thin, and both patches evaluate the same height field
+ * at the same direction inside it, so the overlap is not merely invisible —
+ * it is the same surface drawn twice.
+ *
+ * 1e-5 is two orders of magnitude above the f32 reconstruction noise (~1e-7
+ * relative) and two below a pixel. Measured, at the site the artefact was
+ * found: 0.54213% of terrain pixels enclosing background before, 0.00000%
+ * after, from 3 m to 8000 km.
+ */
+export const PATCH_BLEED = 1e-5;
 
 /**
  * Shallowest level the selector may stop at, whatever the distance.
@@ -714,9 +870,16 @@ export const VEG_BANDS = [
  *
  * Only the far band ever approaches this — it covers the 220–1100 m annulus,
  * which is 96% of the scattered area. At 400k per band the instance buffer is
- * 19 MB, which is nothing, and the cap stops being what limits the forest.
+ * 19 MB, which is nothing on a desktop, and the cap stops being what limits
+ * the forest.
+ *
+ * It is not nothing on a phone: 19 MB of GPU storage and another 19 MB of JS
+ * heap for the array backing it, held for the whole session. The lower tiers
+ * scatter at a fraction of the density and so need a fraction of the slots —
+ * see quality.ts, where the number is chosen against the density rather than
+ * against the desktop's headroom.
  */
-export const VEG_BAND_CAPACITY = 400_000;
+export const VEG_BAND_CAPACITY = QUALITY.vegBandCapacity;
 export const VEG_CAPACITY = VEG_BAND_CAPACITY * VEG_BANDS.length;
 
 /** Growth limits, metres. */
@@ -752,8 +915,37 @@ export const VEG_MIN_ELEVATION = 2;
  */
 export const VEG_MIN_COVER = 0.075;
 
-export const VEG_SLOPE_FULL = 0.094;
-export const VEG_MAX_SLOPE = 0.234;
+/**
+ * Slope gates for what will grow, as `1 - cos(theta)` rather than a gradient.
+ *
+ * That measure is what the shaders already have in hand — `1 - dot(n, dir)`,
+ * one dot product from the normal — but it reads as far gentler than it is,
+ * which is how the old numbers survived: 0.234 looks like a fifth of a slope
+ * and is actually **40 degrees**, and grass was gated at 0.28-0.55, which is
+ * 44 degrees thinning out at 63. Sixty-three degrees is not a hillside, it is
+ * a cliff face, and the meadow drawn up it was the most obvious thing wrong
+ * with any steep ground in the build.
+ *
+ * Stated in degrees, so the next person to touch them knows what they are
+ * choosing:
+ *
+ *   trees   full canopy to 22 deg, gone by 33
+ *   grass   full cover  to 20 deg, gone by 32
+ *
+ * Both are the shared closure — see canopyClosure in shaders/terrain.ts — so
+ * the ground tint and where plants actually stand move together. Changing one
+ * without the other is how you get white slopes with trees standing on them.
+ */
+export const VEG_SLOPE_FULL = 0.073;
+export const VEG_MAX_SLOPE = 0.161;
+
+/**
+ * The same, for ground cover. Slightly tighter than the canopy: a stand of
+ * trees on a steep slope is a real thing that holds itself up, and a lawn on
+ * one is not.
+ */
+export const GRASS_SLOPE_FULL = 0.060;
+export const GRASS_MAX_SLOPE = 0.152;
 
 /* ── Climate (SPEC.md §8) ────────────────────────────────────────────────
  *
