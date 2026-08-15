@@ -1876,9 +1876,30 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // The 1.6 km rung is new and does the most work of the three from altitude:
   // it is the scale at which real ground stops being a texture and starts
   // being a place.
+  // Each rung is *rotated*, not merely offset.
+  //
+  // Gradient noise is built on an integer lattice and carries axis-aligned
+  // artefacts because of it — features prefer the cell axes and the diagonals
+  // between them. An offset slides that pattern around without turning it, so
+  // three rungs sampled from the same direction vector all inherit the same
+  // orientation, their artefacts land on top of one another, and what should
+  // be soft mottling reinforces into a rectilinear weave: the tartan visible
+  // on green ground from a few kilometres up.
+  //
+  // Three arbitrary rotations decorrelate the orientations, which is the whole
+  // fix. They cost three dot products each and nothing else, and they do not
+  // need to be exactly orthonormal — a percent of scale error on a noise
+  // lookup is not a quantity anything downstream can observe. What matters is
+  // only that the axes do not coincide.
+  let dB = vec3<f32>(dot(up, vec3<f32>( 0.80,  0.36, -0.48)),
+                     dot(up, vec3<f32>(-0.36,  0.93,  0.10)),
+                     dot(up, vec3<f32>( 0.48,  0.08,  0.87)));
+  let dC = vec3<f32>(dot(up, vec3<f32>( 0.62, -0.61,  0.49)),
+                     dot(up, vec3<f32>( 0.71,  0.70, -0.02)),
+                     dot(up, vec3<f32>(-0.33,  0.36,  0.87)));
   let mA = noised_T(up * (${f(RADIUS)} / 140.0) + vec3<f32>(71.3)).x;
-  let mB = noised_T(up * (${f(RADIUS)} / 430.0) + vec3<f32>(17.9)).x;
-  let mC = noised_T(up * (${f(RADIUS)} / 1600.0) + vec3<f32>(43.1)).x;
+  let mB = noised_T(dB * (${f(RADIUS)} / 430.0) + vec3<f32>(17.9)).x;
+  let mC = noised_T(dC * (${f(RADIUS)} / 1600.0) + vec3<f32>(43.1)).x;
   let fA = 1.0 - smoothstep(70.0, 210.0, mPerPx);
   let fB = 1.0 - smoothstep(215.0, 645.0, mPerPx);
   let fC = 1.0 - smoothstep(800.0, 2400.0, mPerPx);
@@ -2275,11 +2296,11 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // are gone and this is the only thing left carrying variation, so at the old
   // weights the ground went flat. Still deliberately under half: past that the
   // mottling stops reading as soil and starts reading as cloud shadow.
-  alb = mix(alb, mix(alb, savanna, 0.55), clamp(-meso, 0.0, 1.0) * 0.30
+  alb = mix(alb, mix(alb, savanna, 0.55), clamp(-meso, 0.0, 1.0) * 0.26
                                           * (1.0 - smoothstep(0.34, 0.58, mesoWet)));
-  alb = mix(alb, mix(alb, temperate, 0.55), clamp(meso, 0.0, 1.0) * 0.34
+  alb = mix(alb, mix(alb, temperate, 0.55), clamp(meso, 0.0, 1.0) * 0.30
                                             * smoothstep(0.20, 0.46, mesoWet));
-  alb = alb * (1.0 + meso * 0.13);
+  alb = alb * (1.0 + meso * 0.10);
   alb = mix(alb, scree, clast * smoothstep(0.10, 0.34, slopeB)
                         * (1.0 - smoothstep(0.30, 0.60, moist)) * 0.40);
 
