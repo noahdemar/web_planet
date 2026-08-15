@@ -1881,30 +1881,66 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // Gradient noise is built on an integer lattice and carries axis-aligned
   // artefacts because of it — features prefer the cell axes and the diagonals
   // between them. An offset slides that pattern around without turning it, so
-  // three rungs sampled from the same direction vector all inherit the same
-  // orientation, their artefacts land on top of one another, and what should
-  // be soft mottling reinforces into a rectilinear weave: the tartan visible
-  // on green ground from a few kilometres up.
+  // rungs sampled from the same direction vector all inherit one orientation,
+  // their artefacts land on top of one another, and soft mottling reinforces
+  // into a rectilinear weave. Rotating them decorrelates the orientations:
+  // three dot products each, and they need not be exactly orthonormal, since a
+  // percent of scale error on a noise lookup is not observable downstream.
   //
-  // Three arbitrary rotations decorrelate the orientations, which is the whole
-  // fix. They cost three dot products each and nothing else, and they do not
-  // need to be exactly orthonormal — a percent of scale error on a noise
-  // lookup is not a quantity anything downstream can observe. What matters is
-  // only that the axes do not coincide.
+  // Five rungs, 50 m to 5 km, and the top of that range is what matters from
+  // orbit. At 50-100 km a pixel spans 75 to 150 m, so Nyquist has already
+  // taken the 50 m and 140 m rungs and is partway through 430 m — the field
+  // was running on two resolvable octaves and looked exactly as coarse as two
+  // octaves look. Adding 5 km puts a third and fourth back into the band that
+  // is actually on screen there, which is where the detail was missing.
+  //
+  // Extending downward instead would have been the intuitive move and the
+  // wrong one: below about 25 m the global lattice cannot address the field
+  // anyway. It is evaluated at dir * F from a unit vector, so one f32 ULP
+  // moves the sample by F * 2^-23 of a cell, and that passes the ~4% where the
+  // lattice visibly steps. Detail finer than this has to come off the periodic
+  // local lattice, the way the grain ladder does.
+  //
+  // Each rung is gated on its own fade rather than evaluated unconditionally.
+  // Eight hash lookups apiece is not free, and a pixel that cannot resolve a
+  // rung should not be paying for it.
   let dB = vec3<f32>(dot(up, vec3<f32>( 0.80,  0.36, -0.48)),
                      dot(up, vec3<f32>(-0.36,  0.93,  0.10)),
                      dot(up, vec3<f32>( 0.48,  0.08,  0.87)));
   let dC = vec3<f32>(dot(up, vec3<f32>( 0.62, -0.61,  0.49)),
                      dot(up, vec3<f32>( 0.71,  0.70, -0.02)),
                      dot(up, vec3<f32>(-0.33,  0.36,  0.87)));
-  let mA = noised_T(up * (${f(RADIUS)} / 140.0) + vec3<f32>(71.3)).x;
-  let mB = noised_T(dB * (${f(RADIUS)} / 430.0) + vec3<f32>(17.9)).x;
-  let mC = noised_T(dC * (${f(RADIUS)} / 1600.0) + vec3<f32>(43.1)).x;
+  let dD = vec3<f32>(dot(up, vec3<f32>( 0.29,  0.87, -0.40)),
+                     dot(up, vec3<f32>(-0.85,  0.44,  0.29)),
+                     dot(up, vec3<f32>( 0.44,  0.22,  0.87)));
+  let dE = vec3<f32>(dot(up, vec3<f32>(-0.51,  0.44,  0.74)),
+                     dot(up, vec3<f32>( 0.66,  0.75, -0.01)),
+                     dot(up, vec3<f32>(-0.55,  0.49, -0.67)));
+
+  let f0 = 1.0 - smoothstep(2500.0, 7500.0, mPerPx);
+  let f1 = 1.0 - smoothstep(25.0, 75.0, mPerPx);
   let fA = 1.0 - smoothstep(70.0, 210.0, mPerPx);
   let fB = 1.0 - smoothstep(215.0, 645.0, mPerPx);
   let fC = 1.0 - smoothstep(800.0, 2400.0, mPerPx);
-  let mesoN = max(fA * 0.34 + fB * 0.40 + fC * 0.46, 1e-3);
-  let mesoRaw = (mA * 0.34 * fA + mB * 0.40 * fB + mC * 0.46 * fC) / mesoN;
+
+  var mAcc = 0.0;
+  if (f0 > 0.004) {
+    mAcc = mAcc + noised_T(dD * (${f(RADIUS)} / 5000.0) + vec3<f32>(11.7)).x * 0.52 * f0;
+  }
+  if (f1 > 0.004) {
+    mAcc = mAcc + noised_T(dE * (${f(RADIUS)} / 50.0) + vec3<f32>(53.4)).x * 0.26 * f1;
+  }
+  if (fA > 0.004) {
+    mAcc = mAcc + noised_T(up * (${f(RADIUS)} / 140.0) + vec3<f32>(71.3)).x * 0.34 * fA;
+  }
+  if (fB > 0.004) {
+    mAcc = mAcc + noised_T(dB * (${f(RADIUS)} / 430.0) + vec3<f32>(17.9)).x * 0.40 * fB;
+  }
+  if (fC > 0.004) {
+    mAcc = mAcc + noised_T(dC * (${f(RADIUS)} / 1600.0) + vec3<f32>(43.1)).x * 0.46 * fC;
+  }
+  let mesoN = max(0.52 * f0 + 0.26 * f1 + 0.34 * fA + 0.40 * fB + 0.46 * fC, 1e-3);
+  let mesoRaw = mAcc / mesoN;
 
   // Tied to the landform, not merely laid over it.
   //
@@ -1912,14 +1948,12 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // a ridge and a gully with equal indifference, and that indifference is the
   // whole tell — it is what makes the mottling read as paint rather than as
   // material. Real cover does not work that way: soil and plants collect on
-  // gentle ground and are stripped off steep ground, continuously, everywhere,
-  // which is why a hillside reads as bare at the top of the slope and vegetated
-  // at the foot of it without anything having drawn that boundary.
+  // gentle ground and are stripped off steep ground, continuously, everywhere.
   //
   // So the field is mixed with slope rather than replaced by it. All landform
   // and the planet is banded like a contour map; all noise and it is the
-  // painted look this replaces. A little under half is where the patches start
-  // following the ground while still having a shape of their own.
+  // painted look this replaces.
+  //
   // Plain slope, not the grain-perturbed slopeB: that form is not declared
   // until below this block and WGSL has no hoisting. The perturbation is a
   // sub-metre wobble anyway, the wrong scale to shape a 1.6 km patch with.
