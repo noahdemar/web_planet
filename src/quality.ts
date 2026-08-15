@@ -90,7 +90,20 @@ const HIGH: QualityTier = {
   octaves: 14,
   lodFactor: 2.2,
   maxLevel: 19,
-  shadows: true,
+  // Off by default, at every tier.
+  //
+  // The cascades put a hard-edged trapezoid of false shadow on flat ground at
+  // low altitude — the footprint of a cascade's own orthographic box, its
+  // interior uniformly darkened rather than showing any silhouette, which
+  // means the caster mesh is reading as nearer the light than the receiver
+  // across the whole region. Until that is understood the artefact is worse
+  // than the feature: contact shadows are a refinement, a black quadrilateral
+  // sliding over the desert is not.
+  //
+  // `H` still turns them on, and nothing else about the machinery changes —
+  // the pass, the cascades and the sampling are all intact and still correct
+  // above the altitude where the trapezoid appears.
+  shadows: false,
   shadowMapSize: 2048,
   shadowCascades: 3,
   shadowLodFactor: 2.0,
@@ -152,7 +165,7 @@ const LOW: QualityTier = {
   octaves: 9,
   lodFactor: 1.5,
   maxLevel: 17,
-  shadows: true,
+  shadows: false,
   shadowMapSize: 1024,
   shadowCascades: 2,
   shadowLodFactor: 1.5,

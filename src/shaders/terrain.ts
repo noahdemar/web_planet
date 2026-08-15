@@ -1631,7 +1631,23 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
       let block = clamp(cf.x * cf.x * 0.82 + cf.y * 0.18, 0.0, 1.0);
       // Faded out at grazing sun, where the intersection is kilometres away
       // laterally and the shadow does not belong under this pixel at all.
-      cloudLit = 1.0 - block * smoothstep(0.02, 0.20, sunUpT);
+      //
+      // And faded out again once the pixel is wider than the cloud casting the
+      // shadow. cloudField sheds its detail octaves as px grows, but it does
+      // not converge to the mean coverage as it does so — it saturates — so
+      // ground far enough away went *fully* shadowed rather than evenly half
+      // lit. At a grazing view the contours of constant footprint are straight
+      // lines across the frame, which is why that arrived as hard geometric
+      // wedges reaching to the horizon rather than as anything cloud-shaped.
+      // Measured at savanna-flat, 180 m, cover 0.30: the whole frame black at
+      // mean luminance 1, against 90 with the deck switched off.
+      //
+      // A shadow that cannot be resolved is not thereby total; it is an
+      // average. Letting it go is the honest end state and it costs nothing —
+      // by the time a pixel spans 3 km the deck above it is many clouds wide
+      // and the ground under it is evenly lit.
+      let cloudRes = 1.0 - smoothstep(300.0, 3000.0, mPerPx);
+      cloudLit = 1.0 - block * smoothstep(0.02, 0.20, sunUpT) * cloudRes;
     }
   }
 

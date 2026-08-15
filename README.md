@@ -182,7 +182,7 @@ The HUD prints the tier, why it was chosen, and the live scale.
 | `V` / `B` | vegetation on·off / band debug colours |
 | `;` `'` | vegetation density · `N` read instance counts |
 | `O` / `P` | sun elevation / azimuth (hold Shift to reverse) |
-| `H` | shadows on·off · `I` invert vertical look |
+| `H` | shadows on·off — **off by default**, see below · `I` invert vertical look |
 | `1`–`7` | shading: natural, LOD, slope, normals, cover, albedo, climate |
 | `G` | metric grid: off → 100 m → 10 m → 1 m → 10 cm |
 | `[` `]` | LOD factor · `,` `.` octaves · `-` `=` max level |
@@ -347,6 +347,16 @@ lattice out of alignment and seam every 4096 m, so the wind direction is
 applied to the gradient instead), refraction of the seabed, caustics, and
 foam persistence — whitecaps appear and vanish with the slope that made them
 rather than decaying.
+
+**Shadows are off by default.** The cascades draw a hard-edged trapezoid of
+false shadow on flat ground at low altitude — the footprint of a cascade's own
+orthographic box, its interior uniformly darkened rather than showing any
+silhouette, which puts the caster mesh nearer the light than the receiver
+across the whole region. `H` turns them on; the pass itself is intact and
+behaves above the altitude where the trapezoid appears. Diagnosis so far: not
+the cloud deck (present with cover at 0), not missing casters (those clear to
+`NO_OCCLUDER` and fail *lit*), and not plain depth-slope bias (adding it
+changed nothing, though the clamp may have been too tight).
 
 **Shadow quality is basic.** 3×3 PCF, no contact hardening, no filtering that
 adapts to cascade. Good enough that relief and canopy read correctly; not good

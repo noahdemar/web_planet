@@ -188,7 +188,31 @@ export function maxOctavesFor(f0: number, lacunarity: number = RELIEF_LACUNARITY
   return Math.floor(Math.log(MAX_NOISE_FREQ / f0) / Math.log(lacunarity)) + 1;
 }
 
-export const DEFAULT_OCTAVES = 14;
+/**
+ * Derived, never chosen.
+ *
+ * This was the literal 14, and four of those octaves were past the ceiling
+ * maxOctavesFor computes for AMP_F0 = 260, which is 10. Past it the field is
+ * not detail, it is quantisation: one f32 ULP of the direction vector moves
+ * the sample by 4.5% of a lattice cell at octave 10 and by 40% at octave 13,
+ * so the position snaps to a coarse sub-lattice and the noise returns the same
+ * value across axis-aligned bands. That is the rectilinear tread pattern
+ * visible on flat, bright ground from a few kilometres up — not a texture, an
+ * aliasing artefact of asking the lattice for detail it cannot address.
+ *
+ * The README already stated the mechanism and the 4%-of-a-cell threshold; the
+ * constant simply drifted away from it. Deriving it means it cannot drift
+ * again: change AMP_F0 or the lacunarity and the ceiling follows.
+ *
+ * It is also four octaves of eight hash evaluations per vertex, paid twice
+ * because the shadow pass runs the same vertex shader — so removing them is a
+ * straight performance win alongside the fix.
+ *
+ * `,` and `.` still move the count at runtime, so the broken range is still
+ * there to look at, which is what the README means by pressing `.` past the
+ * ceiling to watch it break.
+ */
+export const DEFAULT_OCTAVES = maxOctavesFor(AMP_F0);
 
 /**
  * Wavelength below which relief stops being fractal, metres.
