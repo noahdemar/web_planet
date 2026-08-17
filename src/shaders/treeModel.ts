@@ -310,7 +310,7 @@ fn impostorUV(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>) -> vec4<f32
   let yawAt = fract(a / 6.2831853) * yaws;
   let slice0 = floor(yawAt);
   let slice1 = floor(fract((slice0 + 1.0) / yaws) * yaws);
-  let yawMix = smoothstep(0.18, 0.82, fract(yawAt));
+  let yawMix = smoothstep(0.35, 0.65, fract(yawAt));
 
   // Species s owns rows [s, s+1) of the atlas counted from v = 0, because
   // that is the order treeAssets.ts assembles them in.
