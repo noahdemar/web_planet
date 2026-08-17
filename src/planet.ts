@@ -563,6 +563,128 @@ export const RIVER_HEAD_HI = 4;
  */
 export const FLOODPLAIN_AMP = 18;
 
+/* ── Plains swell ────────────────────────────────────────────────────────
+ *
+ * ampAt_ sets its relief from smoothstep(RELIEF_SLOPE_LO, ..., slope), so
+ * ground the bake left flat gets amplified least and flatness is
+ * self-reinforcing. Measured on the shipped bake (`npm run plains`), the flat
+ * sixth of the land carried a median of 4.6 m of relief over a 2 km window.
+ * Real plains over that window run 5-15 m on an active floodplain, 10-50 m on
+ * till and loess, 20-60 m on the Great Plains. Two kilometres of ground that
+ * rises and falls by four metres is a billiard table, and no amount of fine
+ * detail fixes it, because the missing signal is not texture — it is *form*.
+ *
+ * The mistake to avoid is reaching for the existing ladder. Raising AMP_BASE
+ * or dropping RELIEF_SLOPE_LO multiplies every octave, so the plains gain as
+ * much crest-scale noise as they do form, which is the failure already
+ * rejected in the mountains. This is a separate, deliberately low-gain stack
+ * that lives only in the band a plain is shaped in and dies out before it
+ * reaches the octaves that read as roughness.
+ *
+ * LAMBDA is the coarsest wavelength. 22 km is the scale of the swells you
+ * actually cross on a plain — long enough that cresting one changes what you
+ * can see, short enough that four octaves at this lacunarity reach 2.5 km and
+ * so put relief inside the window the flatness was measured in.
+ *
+ * GAIN is the whole character of the term. At 0.5 the stack loses half its
+ * amplitude per octave against a lacunarity of 2.07, so relief falls very
+ * nearly as wavelength: equal slope contribution per octave, no accumulation
+ * toward the fine end, and the result reads as swell rather than as noise laid
+ * over a flat plate. Raising it is what would make plains look busy.
+ *
+ * Plain gradient noise, summed signed — no billow, no ridge. It is therefore
+ * zero-mean by construction and needs no bias term of the kind BILLOW_MEAN and
+ * RIDGE_MEAN exist to remove, which matters here more than anywhere: plains sit
+ * near sea level, and a term with a mean fading in as you approach would walk
+ * the coastline (I2).
+ */
+export const PLAINS_LAMBDA = 22_000;
+export const PLAINS_F0 = RADIUS / PLAINS_LAMBDA;
+export const PLAINS_OCTAVES = 6;
+export const PLAINS_GAIN = 0.62;
+
+/**
+ * Amplitude of the swell, metres — calibrated against `npm run plains`, and
+ * larger than it looks because it is the peak of the stack before the gates.
+ *
+ * Measured on flat ground (median local relief), before and after:
+ *
+ *              2 km        10 km
+ *     before    5.1         19.8
+ *     after    15.2         43.4
+ *
+ * against real plains of 10-50 m over 2 km and 30-100 m over 10 km. The ratio
+ * between the two windows was already right at 3:1 before any of this — what
+ * was missing was scale, not spectrum, which is why the fix is an amplitude
+ * and not a re-tuned gain.
+ *
+ * The shore gate costs a factor of about 2.6 on low ground: its median over
+ * flat land is 0.378, because plains sit below SHORE_FLAT_HI. That is why the
+ * number here is a few hundred metres rather than a few tens, and it is not an
+ * accident worth removing — coastal plains really are flatter than inland
+ * ones, and the alternative is letting a fading octave walk the coastline.
+ *
+ * Mountains pay nothing: the gate is the complement of ampAt_'s relief term,
+ * so the hilly class is bit-identical before and after.
+ */
+export const PLAINS_AMP = 500;
+
+/* ── Aeolian: dune fields ────────────────────────────────────────────────
+ *
+ * The second of the plains processes. A plain is flat because something
+ * deposited it, and what deposited it decides its texture; the swell above is
+ * the form all plains share, and this is the one that only dry ones have.
+ *
+ * Gated on climate rather than on the bake, which is why height_ now takes
+ * clim at all. An erg needs sand supply, wind, and no water to fix it — so
+ * arid *and* warm, on top of the same flat-land gate the swell uses. On this
+ * planet that lands the fields in the subtropical dry belts, which is where
+ * the Sahara, the Rub al Khali, the Namib and the Simpson all are, for the
+ * same reason: the descending limb of the Hadley cell.
+ *
+ * STRETCH is the whole visual signature. Dunes are not lumps, they are long
+ * parallel crests transverse to the prevailing wind, and the aspect ratio is
+ * the thing the eye reads as "desert" before it reads anything else. The
+ * anisotropy is a fixed diagonal scaling of the noise domain, the same trick
+ * the cirrus layer uses: it makes the field vary more slowly along the polar
+ * axis, so crests run roughly north-south under the easterly trades. Crude
+ * next to a real sand-transport model, exactly right for the cost, and — this
+ * is the part that matters — a *linear* map, so the gradient stays exact
+ * rather than needing chain-rule terms for a rotating wind field.
+ *
+ * Ridged, so the crests are sharp and the interdune corridors flat, which is
+ * what a dune field actually looks like from above. Ridged means a nonzero
+ * mean, so RIDGE_MEAN is subtracted per octave exactly as height_ does it —
+ * without that, every octave arriving as the mesh refines would lift the
+ * desert floor and, near sea level, walk the coastline (I2).
+ *
+ * 2.5 km is the coarsest crest spacing: draa scale, the mega-dunes that
+ * organise an erg. Three octaves reach 580 m, which is an ordinary dune.
+ */
+export const AEOLIAN_LAMBDA = 2500;
+export const AEOLIAN_F0 = RADIUS / AEOLIAN_LAMBDA;
+export const AEOLIAN_OCTAVES = 3;
+export const AEOLIAN_GAIN = 0.5;
+export const AEOLIAN_STRETCH = 4.5;
+
+/** Dune height, metres. Draa run 50-150 m; simple dunes 10-30 m. */
+export const AEOLIAN_AMP = 0;
+
+/**
+ * Moisture window. Below DRY_LO is full erg, above DRY_HI no sand at all.
+ *
+ * Fitted to coverage, not chosen. The first window (0.30/0.46) put a sand
+ * weight over 12% of land; the hot-desert extent it implied was right at
+ * ~14%, but a hot desert is not all sand sea — reg and hamada are most of it,
+ * and Earth's ergs are about 6% of land. Tightening to this lands at 7.4%.
+ */
+export const AEOLIAN_DRY_LO = 0.14;
+export const AEOLIAN_DRY_HI = 0.30;
+
+/** Temperature window — sand seas are hot deserts, not tundra. */
+export const AEOLIAN_WARM_LO = 0.45;
+export const AEOLIAN_WARM_HI = 0.65;
+
 /**
  * Wetness window over which the amplification collapses to FLOODPLAIN_AMP.
  *
@@ -1062,6 +1184,7 @@ export const VEG_LEVEL = 14;
 /** Scatter cells per tile edge. 128 → 4.4 m spacing ≈ 520 stems/ha. */
 export const VEG_CELLS = 128;
 
+
 /**
  * Tiles resident at once. Must comfortably exceed the number within
  * VEG_TILE_RANGE (≈15 at L14, plus boundary), because the traversal emits in
@@ -1336,6 +1459,7 @@ export const LAPSE = 0.000165;
  * dark side used to blow out from, and it now costs nothing there.
  */
 export const NIGHT_SKY = 0.020;
+export const MOON_LIGHT = 0.012;
 
 /**
  * Rigid rotation of the cloud deck, radians per second.
@@ -1344,6 +1468,29 @@ export const NIGHT_SKY = 0.020;
  * run forever without distorting anything — so this is the part that is allowed
  * to accumulate.
  */
+/* ── Canopy colour ───────────────────────────────────────────────────────
+ *
+ * The canopy used to *replace* the ground: one colour, blended in at 0.92, so
+ * anywhere forested went to a near-uniform dark green and everything the
+ * biome, the meso ladder and the landform had built underneath it was thrown
+ * away. From orbit that is most of what made continents read as flat — real
+ * forest is not one colour, and you can still see the land through it.
+ */
+
+/** Share of the underlying ground colour a closed canopy keeps. */
+export const CANOPY_KEEP = 0.38;
+/**
+ * Clearing rungs, metres. Roughly 2, 6, 18 and 50 km.
+ *
+ * Forest is patchy at every scale — burns, blowdown, bog, farmland, altitude —
+ * and a cover field that only varies with climate has none of that. These
+ * modulate the *density* rather than the colour, so a clearing shows whatever
+ * is underneath it rather than a lighter shade of tree.
+ */
+export const CANOPY_CLEAR_LAM = [50_000, 18_000, 6_000, 2_000] as const;
+/** How deeply the clearing field can cut cover. */
+export const CANOPY_CLEAR_K = 0.55;
+
 export const CLOUD_SPIN = 0.002;
 
 /**
@@ -1421,6 +1568,43 @@ export const DRAW_RIVERS = 0;
 export const CLOUD_ALT = 6500;
 
 /**
+ * Synoptic scale: the frequency of the low-frequency field that decides where
+ * weather systems *are*, and how hard it gates the cumulus below it.
+ *
+ * This is the knob that sets how many storms the planet has. A gradient-noise
+ * field of frequency f on the unit sphere has on the order of 4*pi*f^2
+ * features, so the count goes as the square and small changes here are not
+ * small changes on screen: f = 2.1 is roughly fifty-five systems, which reads
+ * as an even sprinkle of small cells at every longitude — weather-textured,
+ * but not weather. Earth at any given moment has a handful of large organised
+ * systems with genuinely empty ocean between them.
+ *
+ * 1.3 is measured, not guessed — `npm run storms` counts the storm centres on
+ * the actual field, and it is the value that lands on five. The old 2.1 counts
+ * twenty, eight of them strong. Do not reach for this by intuition: the first
+ * attempt here was 0.62, on the arithmetic that 4*pi*f^2 = 5, and it gives one
+ * supersystem covering a third of the planet rather than five storms. The
+ * arithmetic counts features of the noise; what reads as a storm is a *peak*,
+ * and peaks are denser than features because the field has structure between
+ * its lattice cells. Measure it.
+ *
+ * Five systems at f = 1.3 are about 1/f radians across — some 4,900 km, which
+ * is larger than an Earth synoptic system and is the point: fewer and bigger
+ * was the requirement.
+ *
+ * GAIN is what makes fewer systems read as *larger* rather than merely
+ * sparser. The synoptic term is an offset into the cumulus threshold, so
+ * raising it widens the swing between "inside a system" and "outside one":
+ * the cloud piles into the systems and the space between them opens to clear
+ * air. At the old 0.085 the field only tinted the coverage and a lower
+ * frequency would have given five faint patches on a uniform deck.
+ */
+export const CLOUD_SYN_FREQ = 1.3;
+export const CLOUD_SYN_FREQ2 = 3.25;
+export const CLOUD_SYN_GAIN = 0.17;
+export const CLOUD_SYN_GAIN_CI = 0.15;
+
+/**
  * Vertical extent of the cumulus layer, metres — the base sits at CLOUD_ALT
  * and the tops reach this far above it.
  *
@@ -1490,7 +1674,19 @@ export const AURORA_ALT = 115_000;
 export const AURORA_BAND = 0.92;
 export const AURORA_WIDTH = 0.075;
 /** Overall strength. */
-export const AURORA_GAIN = 0.55;
+export const AURORA_GAIN = 0.22;
+/**
+ * Floor on the grazing term, which caps the limb brightening.
+ *
+ * Emission scales with path length through the layer, so a ray running along
+ * the sheet picks up far more than one crossing it — that is why an aurora is
+ * a faint glow overhead and a bright wall seen edge-on, and it is worth
+ * keeping. But the reciprocal runs away: at 0.09 the limb was eleven times the
+ * face-on value, which is a physical relationship pushed well past where the
+ * thin-layer approximation behind it still holds, and it is what made the band
+ * on the limb read as a solid stripe rather than as light.
+ */
+export const AURORA_GRAZE_MIN = 0.15;
 /**
  * Sun elevation over which the aurora fades out.
  *
@@ -1660,7 +1856,7 @@ export const VEG_MIN_PIXELS = 6.0;
  * boundary is never a visible circle. Doubling the grid buys twice the reach
  * at the same density where density is actually looked at.
  */
-export const GRASS_RANGE = 85;
+export const GRASS_RANGE = 105;
 
 /**
  * Radius held at full density, metres. Everything from here to GRASS_RANGE is
@@ -1674,7 +1870,7 @@ export const GRASS_RANGE = 85;
  * blade size and screen resolution, not of how far the field happens to
  * extend, so it belongs here as a number in metres.
  */
-export const GRASS_FULL = 20;
+export const GRASS_FULL = 24;
 
 /**
  * Cells per side of the camera-centred blade grid, and their spacing.
@@ -1689,11 +1885,11 @@ export const GRASS_FULL = 20;
  * majority of them, while everything that survives costs a full height-field
  * evaluation and five segments of geometry.
  */
-export const GRASS_GRID = 1024;
-export const GRASS_SPACING = 0.17;
+export const GRASS_GRID = 512;
+export const GRASS_SPACING = 0.42;
 
 /** Segments per blade. Four gives a curve; the tip is a triangle. */
-export const GRASS_SEGMENTS = 5;
+export const GRASS_SEGMENTS = 3;
 
 /** Blade height range, metres. */
 export const GRASS_H_LO = 0.22;

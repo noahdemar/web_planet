@@ -17,8 +17,7 @@ export const SAND_LAYER = 4;
 
 export interface TerrainMaterials {
   readonly albedo: DataArrayTexture;
-  readonly normal: DataArrayTexture;
-  readonly roughness: DataArrayTexture;
+  readonly normalRoughness: DataArrayTexture;
 }
 
 async function imageData(url: string): Promise<Uint8ClampedArray> {
@@ -53,15 +52,21 @@ function makeArray(data: Uint8Array, colour: boolean, anisotropy: number): DataA
 
 export async function loadTerrainMaterials(maxAnisotropy: number): Promise<TerrainMaterials> {
   const root = (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? '/';
-  const kinds = ['albedo', 'normal', 'roughness'] as const;
   const pixels = TERRAIN_MATERIAL_SIZE * TERRAIN_MATERIAL_SIZE * 4;
-  const arrays = await Promise.all(kinds.map(async (kind) => {
-    const data = new Uint8Array(pixels * TERRAIN_MATERIAL_NAMES.length);
-    const layers = await Promise.all(TERRAIN_MATERIAL_NAMES.map((name) =>
-      imageData(`${root}materials/${name}_${kind}.jpg`),
-    ));
-    layers.forEach((layer, index) => data.set(layer, index * pixels));
-    return makeArray(data, kind === 'albedo', maxAnisotropy);
+  const albedoData = new Uint8Array(pixels * TERRAIN_MATERIAL_NAMES.length);
+  const normalRoughnessData = new Uint8Array(pixels * TERRAIN_MATERIAL_NAMES.length);
+  await Promise.all(TERRAIN_MATERIAL_NAMES.map(async (name, index) => {
+    const [albedo, normal, roughness] = await Promise.all([
+      imageData(`${root}materials/${name}_albedo.jpg`),
+      imageData(`${root}materials/${name}_normal.jpg`),
+      imageData(`${root}materials/${name}_roughness.jpg`),
+    ]);
+    for (let p = 0; p < pixels; p += 4) normal[p + 3] = roughness[p];
+    albedoData.set(albedo, index * pixels);
+    normalRoughnessData.set(normal, index * pixels);
   }));
-  return { albedo: arrays[0], normal: arrays[1], roughness: arrays[2] };
+  return {
+    albedo: makeArray(albedoData, true, maxAnisotropy),
+    normalRoughness: makeArray(normalRoughnessData, false, maxAnisotropy),
+  };
 }

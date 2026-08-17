@@ -16,7 +16,15 @@ import { BackSide, Mesh, SphereGeometry, Vector3, Vector4 } from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { normalLocal, positionLocal, uniform, varying, vec3 } from 'three/tsl';
 import { wgslFn } from 'three/tsl';
-import { AURORA_ALT, AURORA_BAND, AURORA_GAIN, AURORA_NIGHT, AURORA_WIDTH, RADIUS } from './planet.js';
+import {
+  AURORA_ALT,
+  AURORA_BAND,
+  AURORA_GAIN,
+  AURORA_GRAZE_MIN,
+  AURORA_NIGHT,
+  AURORA_WIDTH,
+  RADIUS,
+} from './planet.js';
 import { atmosphere } from './shaders/atmosphere.js';
 import { noiseBlock } from './shaders/terrain.js';
 
@@ -101,7 +109,7 @@ fn aurora_S(camPos: vec3<f32>, rd: vec3<f32>, sd: vec3<f32>, Rg: f32,
 
   // Path length through the layer, normalised so overhead is 1 and the limb
   // is several. This is the limb brightening.
-  let grazing = 1.0 / max(abs(dot(d, rd)), 0.09);
+  let grazing = 1.0 / max(abs(dot(d, rd)), ${AURORA_GRAZE_MIN});
 
   // Green below, red-magenta above: the 557.7 nm line dominates the lower
   // layer and 630 nm the top, so the gradient runs with height through the

@@ -7,7 +7,7 @@ import {
   LineSegments,
   Vector3,
 } from 'three';
-import { CLOUD_ALT } from './planet.js';
+import { CLOUD_ALT, CLOUD_SYN_FREQ, CLOUD_SYN_FREQ2 } from './planet.js';
 import { QUALITY } from './quality.js';
 import { shaderNoise } from './shaderNoiseCPU.js';
 
@@ -30,8 +30,14 @@ function automaticRain(x: number, y: number, z: number, time: number, cover: num
   const sn = Math.sin(time * 0.002);
   const sx = dx * cs + dz * sn;
   const sz = -dx * sn + dz * cs;
-  const n0 = shaderNoise(sx * 2.1, dy * 2.1 + time * 0.00038, sz * 2.1);
-  const n1 = shaderNoise(sx * 5.3 + 37.1, dy * 5.3 + time * 0.00066, sz * 5.3 + 37.1);
+  // The same synoptic field cloudField_ gates the deck with — see
+  // CLOUD_SYN_FREQ. It has to be the identical frequency or rain falls where
+  // there is no storm: this decides whether it is raining *at the camera*, and
+  // the player can see the sky it is supposed to be falling out of.
+  const f0 = CLOUD_SYN_FREQ;
+  const f1 = CLOUD_SYN_FREQ2;
+  const n0 = shaderNoise(sx * f0, dy * f0 + time * 0.00038, sz * f0);
+  const n1 = shaderNoise(sx * f1 + 37.1, dy * f1 + time * 0.00066, sz * f1 + 37.1);
   const itcz = Math.exp(-((lat / 0.14) ** 2));
   const dry = Math.exp(-(((lat - 0.45) / 0.16) ** 2));
   const storm = Math.exp(-(((lat - 0.74) / 0.17) ** 2));

@@ -70,20 +70,26 @@ export type ShadowFactor = (rel: unknown) => N;
 function bladeGeometry(segments: number): BufferGeometry {
   const seg: number[] = [];
   const idx: number[] = [];
-  for (let i = 0; i < segments; i++) {
-    const t = i / segments;
-    seg.push(t, -1, t, 1);
+  const offsets = [
+    [-0.14, -0.11], [0.15, -0.07], [-0.08, 0.16], [0.13, 0.14],
+  ];
+  for (const [ox, oy] of offsets) {
+    const base = seg.length / 4;
+    for (let i = 0; i < segments; i++) {
+      const t = i / segments;
+      seg.push(t, -1, ox, oy, t, 1, ox, oy);
+    }
+    seg.push(1, 0, ox, oy);
+    for (let i = 0; i < segments - 1; i++) {
+      const a = base + i * 2;
+      idx.push(a, a + 1, a + 3, a, a + 3, a + 2);
+    }
+    const last = base + (segments - 1) * 2;
+    idx.push(last, last + 1, base + segments * 2);
   }
-  seg.push(1, 0); // tip
-  for (let i = 0; i < segments - 1; i++) {
-    const a = i * 2;
-    idx.push(a, a + 1, a + 3, a, a + 3, a + 2);
-  }
-  const last = (segments - 1) * 2;
-  idx.push(last, last + 1, segments * 2);
 
   const g = new BufferGeometry();
-  g.setAttribute('bseg', new BufferAttribute(new Float32Array(seg), 2));
+  g.setAttribute('bseg', new BufferAttribute(new Float32Array(seg), 4));
   g.setIndex(idx);
   return g;
 }
@@ -173,7 +179,7 @@ export class Grass {
 
     const readInsts = storage(this.instAttr, 'vec4', GRASS_CAPACITY).toReadOnly();
     const inst = asVec4(readInsts.element(instanceIndex));
-    const bseg = asVec3(attribute('bseg', 'vec2'));
+    const bseg = asVec4(attribute('bseg', 'vec4'));
 
     const mat = new MeshBasicNodeMaterial();
     mat.positionNode = asVec3(
@@ -188,7 +194,7 @@ export class Grass {
     const pu = asVec3(
       call(grassVertex, {
         inst,
-        seg: asVec3(vec3(bseg.x.add(e), bseg.y, 0)).xy,
+        seg: asVec4(vec4(bseg.x.add(e), bseg.y, bseg.z, bseg.w)),
         camPos: this.camPos,
         cfg: this.dcfg,
       }),
@@ -196,7 +202,7 @@ export class Grass {
     const pv = asVec3(
       call(grassVertex, {
         inst,
-        seg: asVec3(vec3(bseg.x, bseg.y.add(e), 0)).xy,
+        seg: asVec4(vec4(bseg.x, bseg.y.add(e), bseg.z, bseg.w)),
         camPos: this.camPos,
         cfg: this.dcfg,
       }),

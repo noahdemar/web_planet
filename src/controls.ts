@@ -106,6 +106,13 @@ export class FlyControls {
     maxR: number;
   }) => void;
 
+  /**
+   * Tangent north, carried from frame to frame rather than rebuilt.
+   *
+   * This is what removes the pole singularity — see refreshFrame.
+   */
+  private northRef: V3 = [0, 1, 0];
+
   /** Local frame, refreshed each update. */
   up: V3 = [0, 0, 1];
   forward: V3 = [0, 1, 0];
@@ -127,7 +134,6 @@ export class FlyControls {
   private joyActive = false;
   private pinchActive = false;
   private pinchStart = 0;
-  private pinchMul = 1;
 
   constructor(private dom: HTMLElement) {
     this.attach();
@@ -217,12 +223,33 @@ export class FlyControls {
     this.attachTouch();
   }
 
-  /** Touch handling: left half = move joystick, right half = look, two-finger pinch on the right = speed. */
+  /**
+   * Touch handling.
+   *
+   *   one finger, anywhere    look
+   *   two fingers, pinch      zoom — toward or away from the ground
+   *   joystick pad            move, from the lower-left corner only
+   *
+   * The old split put the joystick across the *entire* left half and look
+   * across the entire right, so which half of the glass you happened to touch
+   * decided what a swipe meant, and a pinch had to be started on the right or
+   * it did nothing. Pinch also drove `speedMul`, which is a flight control
+   * rather than a zoom: it changed how fast a later movement would be instead
+   * of moving anything, so the picture did not respond to the gesture at all.
+   *
+   * One finger looking everywhere is what a touch user expects, and the
+   * joystick keeps translation without claiming half the screen — it now has
+   * to be started inside the pad in the corner.
+   */
   private attachTouch(): void {
     const d = this.dom;
 
-    const getSide = (clientX: number): 'left' | 'right' =>
-      clientX < d.clientWidth / 2 ? 'left' : 'right';
+    // The joystick pad: a corner, not a half. Anything outside it looks.
+    const getSide = (clientX: number, clientY: number): 'left' | 'right' => {
+      const padR = Math.min(160, d.clientWidth * 0.32);
+      const inPad = clientX < padR && clientY > d.clientHeight - padR;
+      return inPad ? 'left' : 'right';
+    };
 
     const onStart = (e: TouchEvent) => {
       for (let i = 0; i < e.changedTouches.length; i++) {
@@ -232,7 +259,7 @@ export class FlyControls {
           startY: t.clientY,
           lastX: t.clientX,
           lastY: t.clientY,
-          side: getSide(t.clientX),
+          side: getSide(t.clientX, t.clientY),
         });
       }
       this.updateTouchPinch();
@@ -251,6 +278,7 @@ export class FlyControls {
         s.lastX = t.clientX;
         s.lastY = t.clientY;
         if (s.side === 'right' && rightSide.length === 1 && !this.pinchActive) {
+          // Single finger anywhere outside the pad: look.
           const scale = 0.0024;
           this.yaw += dx * scale;
           this.pitch += (this.invertY ? 1 : -1) * dy * scale;
@@ -276,6 +304,20 @@ export class FlyControls {
     d.addEventListener('touchcancel', onEnd, { passive: false });
   }
 
+  /**
+   * Pinch to zoom.
+   *
+   * Zoom here is a *dolly*, not a field-of-view change: the camera moves along
+   * its view direction, so parallax responds and the horizon behaves, which is
+   * what makes the planet read as a place rather than a photograph being
+   * scaled. Field of view would have been cheaper and would have looked like a
+   * zoom lens.
+   *
+   * The step is proportional to altitude, because that is the only scale that
+   * works across seven decades of range: a fixed step is a crawl from orbit
+   * and a jump into the ground at eye height. Clamped so one gesture cannot
+   * put the camera under the terrain.
+   */
   private updateTouchPinch(): void {
     const right = [...this.touches.values()].filter((s) => s.side === 'right');
     if (right.length >= 2) {
@@ -284,10 +326,22 @@ export class FlyControls {
       const dist = Math.hypot(a.lastX - b.lastX, a.lastY - b.lastY);
       if (!this.pinchActive) {
         this.pinchStart = dist;
-        this.pinchMul = this.speedMul;
         this.pinchActive = true;
-      } else if (this.pinchStart > 0) {
-        this.speedMul = Math.max(1e-4, Math.min(1e4, this.pinchMul * (dist / this.pinchStart)));
+      } else if (this.pinchStart > 0.5 && dist > 0.5) {
+        // Spreading the fingers moves in; pinching moves out.
+        const ratio = dist / this.pinchStart;
+        this.pinchStart = dist;
+        const alt = Math.max(2, this.altitude);
+        // A doubling of finger separation covers about half the remaining
+        // height to the ground, which feels like one decisive gesture without
+        // being able to overshoot through the surface in a single frame.
+        const step = alt * 0.5 * (ratio - 1);
+        const move = Math.max(-alt * 0.6, Math.min(alt * 0.6, step));
+        this.pos = [
+          this.pos[0] + this.forward[0] * move,
+          this.pos[1] + this.forward[1] * move,
+          this.pos[2] + this.forward[2] * move,
+        ];
       }
     } else {
       this.pinchActive = false;
@@ -349,10 +403,52 @@ export class FlyControls {
     this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch));
     this.up = normalize(this.pos);
 
-    // A stable tangent reference; swapped near the poles where +Y degenerates.
-    const ref: V3 = Math.abs(dot([0, 1, 0], this.up)) > 0.999 ? [0, 0, 1] : [0, 1, 0];
-    const east = normalize(cross(ref, this.up));
-    const north = normalize(cross(this.up, east));
+    // The horizon frame is *transported*, not rebuilt from a world axis.
+    //
+    // It used to be built each frame from +Y, swapping to +Z within 0.999 of
+    // the pole. Both halves of that fail, and they fail together exactly where
+    // the user noticed:
+    //
+    //   cross([0,1,0], up) has magnitude sin(angle from the pole), so as the
+    //   camera approaches, that vector shrinks toward zero and `normalize`
+    //   turns whatever is left — mostly rounding error — into a full-length
+    //   basis. The heading spins on its own.
+    //
+    //   Then the swap to +Z is a *hard* switch, so the moment it trips the
+    //   basis rotates about ninety degrees in one frame while yaw stays the
+    //   number it was. The view snaps.
+    //
+    // Neither is fixable by moving the threshold, because the underlying
+    // quantity — the azimuth of a fixed world axis, seen from the local
+    // horizon — is genuinely undefined at the pole. There is no reference
+    // direction to pick.
+    //
+    // So none is picked. `northRef` is carried across frames and merely
+    // re-orthogonalised against the new `up`, which is parallel transport: it
+    // is continuous everywhere including across the pole itself, and the
+    // horizon still stays level because it is a tangent vector by
+    // construction. What it gives up is that "north" stops meaning geographic
+    // north after a long traverse — the frame accumulates the holonomy of the
+    // path, which is the honest behaviour on a sphere and is invisible unless
+    // something draws a compass.
+    let north = this.northRef;
+    let tx = north[0] - this.up[0] * dot(north, this.up);
+    let ty = north[1] - this.up[1] * dot(north, this.up);
+    let tz = north[2] - this.up[2] * dot(north, this.up);
+    let tl = Math.hypot(tx, ty, tz);
+    if (tl < 1e-4) {
+      // Only reachable on a teleport that lands a quarter turn away in one
+      // step — the tour does exactly that. Any tangent will do; continuity was
+      // already broken by the jump.
+      const alt: V3 = Math.abs(this.up[1]) > 0.9 ? [0, 0, 1] : [0, 1, 0];
+      tx = alt[0] - this.up[0] * dot(alt, this.up);
+      ty = alt[1] - this.up[1] * dot(alt, this.up);
+      tz = alt[2] - this.up[2] * dot(alt, this.up);
+      tl = Math.hypot(tx, ty, tz);
+    }
+    north = [tx / tl, ty / tl, tz / tl];
+    this.northRef = north;
+    const east = normalize(cross(north, this.up));
 
     const cp = Math.cos(this.pitch);
     const sp = Math.sin(this.pitch);

@@ -118,7 +118,7 @@ fn vegSample(t0: vec4<f32>, t1: vec4<f32>, t2: vec4<f32>,
   let clim = climate_V(dir, t6.x, fullBand);
   let spec = spectrum_V(dir, clim, bakeH);
   let hn = height_V(dir, i32(cfg.z), cfg.y, bakeH, t5.yzw, t6.x, distAxis, cfg.x,
-                    fullBand, spec);
+                    fullBand, spec, clim);
   let h = hn.x;
 
   // Surface normal from the tangential height gradient, as in the terrain
@@ -196,7 +196,7 @@ fn vegSample(t0: vec4<f32>, t1: vec4<f32>, t2: vec4<f32>,
   let meshSpacing = dCam / max(cfg2.w * ${PATCH_SEGS}.0, 1.0);
   let meshBand = cfg.x / max(meshSpacing, 0.01);
   let hDraw = height_V(dir, i32(cfg.z), cfg.y, bakeH, t5.yzw, t6.x, distAxis,
-                       cfg.x, meshBand, spec).x;
+                       cfg.x, meshBand, spec, clim).x;
 
   let pos = anchorRel + dirC * hDraw + dd * (cfg.x + hDraw);
 

@@ -151,7 +151,7 @@ fn grassSample(cell: vec2<f32>, bake: vec4<f32>, bake2: vec4<f32>,
   // the growth test below needs the same climate. One evaluation serves both.
   let clim = climate_R(dir, bake2.x, 1.0e9);
   let hn = height_R(dir, i32(cfg.z), cfg.y, bakeH, bake.yzw, bake2.x, distAxis,
-                    radius, 1.0e9, spectrum_R(dir, clim, bakeH));
+                    radius, 1.0e9, spectrum_R(dir, clim, bakeH), clim);
   let h = hn.x;
 
   // Nothing grows under water.
@@ -236,21 +236,23 @@ fn bladeRnd_${s}(inst: vec4<f32>) -> vec3<f32> {
  * place.
  */
 export const grassVertex = wgslFn(/* wgsl */ `
-fn grassVertex(inst: vec4<f32>, seg: vec2<f32>, camPos: vec3<f32>,
+fn grassVertex(inst: vec4<f32>, seg: vec4<f32>, camPos: vec3<f32>,
                cfg: vec4<f32>) -> vec3<f32> {
-  let base = inst.xyz;
-  let h = bladeHeight_G2(inst);
+  let anchor = inst.xyz;
   let rnd = bladeRnd_G2(inst);
+  let variation = fract(rnd.x + seg.z * 7.13 + seg.w * 11.71);
+  let h = bladeHeight_G2(inst) * mix(0.72, 1.08, variation);
   let t = seg.x;
 
-  let up = normalize(camPos + base);
+  let up = normalize(camPos + anchor);
   var axis = vec3<f32>(0.0, 1.0, 0.0);
   if (abs(up.y) > 0.99) { axis = vec3<f32>(0.0, 0.0, 1.0); }
   let east = normalize(cross(axis, up));
   let north = cross(up, east);
+  let base = anchor + east * seg.z + north * seg.w;
 
   // Per-blade yaw, so the field has no grain.
-  let a = rnd.x * 6.2831853;
+  let a = variation * 6.2831853;
   let facing = east * cos(a) + north * sin(a);
 
   // Wind. One travelling wave over the field plus a per-blade phase: the wave

@@ -421,7 +421,9 @@ export class TerrainMesh {
 
     // One expensive evaluation, reused: the same node feeds both the vertex
     // position and the fragment stage, so the noise runs once per vertex.
-    const surf = asVec4(nCall(patchSurface, { ...args, baked, bake2, spec }));
+    const surf = asVec4(nCall(patchSurface, {
+      ...args, baked, bake2, spec, clim: asVec2(clim.xy),
+    }));
 
     // ── standing water ──────────────────────────────────────────────────
     //
@@ -496,16 +498,10 @@ export class TerrainMesh {
       const tz = asVec4(texture(map, pos.xy.mul(0.18)).depth(layer as never));
       return asVec4(tx.mul(triWeight.x).add(ty.mul(triWeight.y)).add(tz.mul(triWeight.z)).div(triNorm));
     };
-    const baseA = tri(materials.albedo, baseLayer, materialPos);
-    const baseB = tri(materials.albedo, baseLayer, asVec3(materialPos.yzx.mul(1.071).add(vec3(19.1, 7.3, 31.7))));
-    const rockA = tri(materials.albedo, int(ROCK_LAYER), materialPos);
-    const rockB = tri(materials.albedo, int(ROCK_LAYER), asVec3(materialPos.zxy.mul(1.113).add(vec3(43.7, 13.9, 5.1))));
-    const baseAlbedo = asVec4(nMix(baseA, baseB, float(0.5)));
-    const rockAlbedo = asVec4(nMix(rockA, rockB, float(0.5)));
-    const baseNormal = tri(materials.normal, baseLayer, materialPos);
-    const rockNormal = tri(materials.normal, int(ROCK_LAYER), materialPos);
-    const baseRough = tri(materials.roughness, baseLayer, materialPos);
-    const rockRough = tri(materials.roughness, int(ROCK_LAYER), materialPos);
+    const baseAlbedo = tri(materials.albedo, baseLayer, materialPos);
+    const rockAlbedo = tri(materials.albedo, int(ROCK_LAYER), materialPos);
+    const baseNormalRoughness = tri(materials.normalRoughness, baseLayer, materialPos);
+    const rockNormalRoughness = tri(materials.normalRoughness, int(ROCK_LAYER), materialPos);
 
     const material = new MeshBasicNodeMaterial();
     material.positionNode = position;
@@ -526,8 +522,8 @@ export class TerrainMesh {
         weather: this.weather,
         matBase: baseAlbedo,
         matRock: rockAlbedo,
-        matBaseNR: nVec4(baseNormal.xyz, baseRough.x),
-        matRockNR: nVec4(rockNormal.xyz, rockRough.x),
+        matBaseNR: baseNormalRoughness,
+        matRockNR: rockNormalRoughness,
         shadow: shadowFactor ? shadowFactor(relPos) : float(1),
       }),
     );

@@ -26,6 +26,19 @@ import {
   BAND_FADE_LO,
   CHANNEL_DEPTH,
   CHANNEL_HALF_HI,
+  AEOLIAN_AMP,
+  AEOLIAN_DRY_HI,
+  AEOLIAN_DRY_LO,
+  AEOLIAN_F0,
+  AEOLIAN_GAIN,
+  AEOLIAN_OCTAVES,
+  AEOLIAN_STRETCH,
+  AEOLIAN_WARM_HI,
+  AEOLIAN_WARM_LO,
+  PLAINS_AMP,
+  PLAINS_F0,
+  PLAINS_GAIN,
+  PLAINS_OCTAVES,
   CHANNEL_HALF_LO,
   CHANNEL_WIDTH_K,
   COAST_WARP_AMP,
@@ -225,12 +238,30 @@ export function warpForCoast(dir: V3, bakeH: number): V3 {
   ]);
 }
 
+/**
+ * Bake fields supplied by the caller instead of sampled here.
+ *
+ * The scatter does not read the atlas per instance. It reads it once at the
+ * centre of a VEG_LEVEL tile and reconstructs the fields linearly across it —
+ * so a plant stands on a slightly *different* surface from the one the terrain
+ * draws, and the difference is what decides whether trees float. Injecting the
+ * reconstructed fields is what lets tools/anchor.ts measure that gap directly
+ * rather than inferring it.
+ */
+export interface BakeOverride {
+  elevation?: number;
+  wetness?: number;
+  channelDist?: number;
+  slope?: number;
+}
+
 export function heightAt(
   dir: V3,
   octaves: number,
   hscale = 1,
   bandLimit = 1e9,
   flood = true,
+  override?: BakeOverride,
 ): number {
   if (!surface) throw new Error('heightAt: call setPlanetSurface() first');
 
@@ -272,27 +303,34 @@ export function heightAt(
   const yp = along(t2, 1), ym = along(t2, -1);
   const gx = (xp.elevation - xm.elevation) / (2 * e);
   const gy = (yp.elevation - ym.elevation) / (2 * e);
-  const slope = Math.hypot(gx, gy) / RADIUS;
+  const slopeExact = Math.hypot(gx, gy) / RADIUS;
+
+  // Everything below reads these four, and only these four, out of the bake.
+  // Overriding them is how the scatter's view of the ground is reproduced.
+  const slope = override?.slope ?? slopeExact;
+  const bakeHu = override?.elevation ?? bakeH;
+  const wetnessU = override?.wetness ?? wetness;
+  const channelDistU = override?.channelDist ?? channelDist;
 
   // Distance to the nearest channel, straight from the bake. See
   // carveChannels: it is measured, not reconstructed.
-  const distAxis = channelDist;
+  const distAxis = channelDistU;
 
   // Mirrors flatWet_ in the shader. Withdrawn once, before anything reads it:
   // this function is what the camera stands on and what the offline tools
   // measure, so a disagreement here is the ground moving under your feet.
   const wetE =
-    wetness - FLAT_WET_CUT * (1 - sstep(FLAT_WET_LO, FLAT_WET_HI, slope));
+    wetnessU - FLAT_WET_CUT * (1 - sstep(FLAT_WET_LO, FLAT_WET_HI, slope));
 
   // Mirrors the facet term in height_ — see the landform block in planet.ts.
   const facet = FACET_K * sstep(FACET_SLOPE_LO, FACET_SLOPE_HI, slope);
 
   const relief = sstep(RELIEF_SLOPE_LO, RELIEF_SLOPE_HI, slope);
-  const landW = sstep(-350, 40, bakeH);
+  const landW = sstep(-350, 40, bakeHu);
   const valley = sstep(VALLEY_WET_LO, VALLEY_WET_HI, wetE);
   // Matches the shore term in the shader: the coastline is pinned to the bake
   // so it cannot move with the camera.
-  const shore = SHORE_FLAT_FLOOR + (1 - SHORE_FLAT_FLOOR) * sstep(0, SHORE_FLAT_HI, Math.abs(bakeH));
+  const shore = SHORE_FLAT_FLOOR + (1 - SHORE_FLAT_FLOOR) * sstep(0, SHORE_FLAT_HI, Math.abs(bakeHu));
   const land = (AMP_BASE + AMP_RELIEF * relief) * (0.22 + 0.78 * landW) * shore;
   const amp = land + (FLOODPLAIN_AMP - land) * valley;
 
@@ -311,13 +349,13 @@ export function heightAt(
   // octave does not switch on until a band limit of 560, by which point the
   // climate's finest octave (frequency 21) has been saturated for an order of
   // magnitude.
-  const c = climateAt(dir, wetness);
+  const c = climateAt(dir, wetnessU);
   const [sGain, sCross] = spectrumAt({
-    temp: tempAtCPU(c.temp, bakeH),
+    temp: tempAtCPU(c.temp, bakeHu),
     base: c.temp,
     moist: c.moist,
     season: c.season,
-    elevation: bakeH,
+    elevation: bakeHu,
   });
 
   let mAmp = 1;
@@ -396,12 +434,17 @@ export function heightAt(
 
   // The reconstructed channel, cut into the valley floor. Mirrors channel_().
   const chOn = sstep(VALLEY_WET_LO, VALLEY_WET_HI, wetE);
+  // clamp(k*sqrt(10^wet), LO, HI), mirroring channel_ exactly.
+  //
+  // This had five COAST_WARP_* identifiers inside the Math.min — an import list
+  // pasted into the expression. COAST_WARP_OCTAVES is 5, so it won, and the
+  // CPU cut a river bowl 12.5 m across where the shader cuts 150-2250 m. The
+  // GPU was unaffected (vegetation and terrain both go through channel_), so
+  // the only symptom was this function reporting ground up to CHANNEL_DEPTH
+  // above the drawn riverbed — which is what the camera's ground-follow stands
+  // on and what every offline tool measures.
   const halfW = Math.min(
-    COAST_WARP_AMP,
-  COAST_WARP_F0,
-  COAST_WARP_FADE,
-  COAST_WARP_OCTAVES,
-  CHANNEL_HALF_HI,
+    CHANNEL_HALF_HI,
     Math.max(CHANNEL_HALF_LO, CHANNEL_WIDTH_K * Math.sqrt(10 ** wetE)),
   );
   const chM = chOn > 0 ? 1 - sstep(0, halfW * 2.5, distAxis) : 0;
@@ -410,7 +453,58 @@ export function heightAt(
   // being cut here in the same breath.
   const incision = CHANNEL_DEPTH * DRAW_RIVERS * chOn * chM * chM;
 
-  const h0 = (bakeH - incision + ((mSum - mBias) / mNorm) * amp) * hscale;
+  // Plains swell — mirrors plainsSwell_ in the shader. Value only, as with
+  // everything else here: the CPU is asked what the ground is, not which way
+  // it faces.
+  let swell = 0;
+  {
+    const reliefW = 1 - relief;
+    const gate = reliefW * landW * shore * (1 - valley);
+    if (gate > 0.002) {
+      let pAmp = 1;
+      let pFrq = PLAINS_F0;
+      let pSum = 0;
+      let pNorm = 0;
+      for (let i = 0; i < PLAINS_OCTAVES; i++) {
+        const w = sstep(BAND_FADE_LO, BAND_FADE_HI, bandLimit / pFrq);
+        if (w > 0.002) {
+          const a = i * 19.3 + 101.7;
+          pSum += w * pAmp * shaderNoise(fdx * pFrq + a, fdy * pFrq + a, fdz * pFrq + a);
+        }
+        pNorm += pAmp;
+        pAmp *= PLAINS_GAIN;
+        pFrq *= RELIEF_LACUNARITY;
+      }
+      swell = (pSum * PLAINS_AMP * gate) / pNorm;
+    }
+
+    // Dune fields — mirrors the aeolian block in plainsSwell_.
+    const arid = 1 - sstep(AEOLIAN_DRY_LO, AEOLIAN_DRY_HI, c.moist);
+    const warm = sstep(AEOLIAN_WARM_LO, AEOLIAN_WARM_HI, c.temp);
+    const sand = gate * arid * warm;
+    if (sand > 0.002) {
+      const iy = 1 / AEOLIAN_STRETCH;
+      let aAmp = 1;
+      let aFrq = AEOLIAN_F0;
+      let aSum = 0;
+      let aNorm = 0;
+      for (let i = 0; i < AEOLIAN_OCTAVES; i++) {
+        const w = sstep(BAND_FADE_LO, BAND_FADE_HI, bandLimit / aFrq);
+        if (w > 0.002) {
+          const k = i * 5.9 + 313.1;
+          const n = shaderNoise(fdx * aFrq + k, fdy * iy * aFrq + k, fdz * aFrq + k);
+          const r = 1 - Math.abs(n);
+          aSum += w * aAmp * (r * r - RIDGE_MEAN);
+        }
+        aNorm += aAmp;
+        aAmp *= AEOLIAN_GAIN;
+        aFrq *= RELIEF_LACUNARITY;
+      }
+      swell += (aSum * AEOLIAN_AMP * sand) / aNorm;
+    }
+  }
+
+  const h0 = (bakeHu - incision + ((mSum - mBias) / mNorm) * amp + swell) * hscale;
 
   const h = h0;
 
@@ -428,7 +522,7 @@ export function heightAt(
   const lakeOn = sstep(LAKE_ON_LO, LAKE_ON_HI, lakeDepth);
   const waterZ = Math.max(
     0,
-    bakeH + lakeDepth - 20000 * (1 - lakeOn),
+    bakeHu + lakeDepth - 20000 * (1 - lakeOn),
     // No river water — see the note in waterLevel_ in shaders/terrain.ts.
     // The carved valley stays; only the water in it is gone.
   );

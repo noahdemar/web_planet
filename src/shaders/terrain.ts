@@ -65,7 +65,27 @@ import {
   CHANNEL_WIDTH_K,
   COAST_WARP_AMP,
   COAST_WARP_F0,
+  CANOPY_CLEAR_K,
+  CANOPY_CLEAR_LAM,
+  CANOPY_KEEP,
   CLOUD_ALT,
+  AEOLIAN_AMP,
+  AEOLIAN_DRY_HI,
+  AEOLIAN_DRY_LO,
+  AEOLIAN_F0,
+  AEOLIAN_GAIN,
+  AEOLIAN_OCTAVES,
+  AEOLIAN_STRETCH,
+  AEOLIAN_WARM_HI,
+  AEOLIAN_WARM_LO,
+  PLAINS_AMP,
+  PLAINS_F0,
+  PLAINS_GAIN,
+  PLAINS_OCTAVES,
+  CLOUD_SYN_FREQ,
+  CLOUD_SYN_FREQ2,
+  CLOUD_SYN_GAIN,
+  CLOUD_SYN_GAIN_CI,
   CLOUD_SHEAR_MAX,
   CLOUD_SPIN,
   CLOUD_ZONAL,
@@ -82,6 +102,7 @@ import {
   LAKE_ON_LO,
   LAPSE,
   NIGHT_SKY,
+  MOON_LIGHT,
   LAT_EXP,
   RELIEF_GAIN,
   RELIEF_LACUNARITY,
@@ -443,11 +464,11 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
   // is what shears the cells into spiral arms and drawn-out fronts. This is
   // the same reason real cloud organises — it is advected by a rotational
   // field — arrived at by the cheapest route rather than by solving for it.
-  let syn = noised_${s}(sdir * 2.1 + drift0 * 0.35);
+  let syn = noised_${s}(sdir * ${f(CLOUD_SYN_FREQ)} + drift0 * 0.35);
   let sg = syn.yzw - sdir * dot(sdir, syn.yzw);
   let curl = cross(sdir, sg);
   // Second, finer swirl so the arms have arms.
-  let syn2 = noised_${s}(sdir * 5.3 + drift0 * 0.6 + vec3<f32>(37.1));
+  let syn2 = noised_${s}(sdir * ${f(CLOUD_SYN_FREQ2)} + drift0 * 0.6 + vec3<f32>(37.1));
   let sg2 = syn2.yzw - sdir * dot(sdir, syn2.yzw);
   // Enough to organise, not so much that the cells stretch into marbling. At
   // 0.16 the whole planet came out as swirled paint: the arms were longer than
@@ -556,7 +577,7 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
   // sky under cumulus at neutral coverage, about right for Earth once the
   // cirrus layer is added on top.
   let cu = smoothstep(0.020, 0.082,
-                      billow + bias * 0.06 + synoptic * 0.085 + (cover - 0.5) * 0.09);
+                      billow + bias * 0.06 + synoptic * ${f(CLOUD_SYN_GAIN)} + (cover - 0.5) * 0.09);
 
   // ── cirrus ────────────────────────────────────────────────────────────
   //
@@ -578,7 +599,7 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
     cfrq = cfrq * 2.6;
   }
   let ci = smoothstep(0.10, 0.40,
-                      csum / cnorm + bias * 0.25 + synoptic * 0.09 + (cover - 0.5) * 0.3);
+                      csum / cnorm + bias * 0.25 + synoptic * ${f(CLOUD_SYN_GAIN_CI)} + (cover - 0.5) * 0.3);
 
   return vec2<f32>(cu, ci);
 }
@@ -964,6 +985,110 @@ export function field(s: string): string {
 ${ampBlock(s)}
 
 /**
+ * Plains swell — see the PLAINS_* block in planet.ts.
+ *
+ * Returns (height m, gradient per unit direction). Gated on the complement of
+ * ampAt_'s own relief term, so it is exactly the ground the amplification
+ * leaves flat, and it costs nothing where the amplification is doing the work:
+ * the weight is zero above RELIEF_SLOPE_HI and the whole stack is skipped.
+ *
+ * Three gates, all of which the caller already has:
+ *
+ *   plainsW  1 - relief. Complementary by construction, so the two never
+ *            double up and there is no seam where one hands over to the other.
+ *   landW    off in the sea, and faded rather than switched so the term does
+ *            not step at the shoreline.
+ *   shore    the same coastline pin ampAt_ uses. Plains sit near sea level,
+ *            which is the one elevation where added relief changes the
+ *            *topology* of what is drawn — an island appearing on approach —
+ *            rather than its shape.
+ *   valley   suppressed on floodplains. An active floodplain really is flat;
+ *            that is what makes it a floodplain, and FLOODPLAIN_AMP already
+ *            spends effort holding it so.
+ *
+ * All four are smooth in bakeH, slope and wet for the reason the anchor test
+ * exists: the scatter reconstructs those fields linearly across a 563 m tile,
+ * so a sharp gate here puts trees off the ground (I3). See npm run anchor.
+ */
+fn plainsSwell_${s}(dir: vec3<f32>, bakeH: f32, slope: f32, wet: f32,
+                      bandLimit: f32, clim: vec2<f32>) -> vec4<f32> {
+  let relief = smoothstep(${f(RELIEF_SLOPE_LO)}, ${f(RELIEF_SLOPE_HI)}, slope);
+  let landW = smoothstep(-350.0, 40.0, bakeH);
+  let valley = smoothstep(${f(VALLEY_WET_LO)}, ${f(VALLEY_WET_HI)}, wet);
+  let shore = mix(${f(SHORE_FLAT_FLOOR)}, 1.0,
+                  smoothstep(0.0, ${f(SHORE_FLAT_HI)}, abs(bakeH)));
+  let gate = (1.0 - relief) * landW * shore * (1.0 - valley);
+  if (gate <= 0.002) { return vec4<f32>(0.0); }
+
+  var amp = 1.0;
+  var frq = ${f(PLAINS_F0)};
+  var sum = 0.0;
+  var g = vec3<f32>(0.0);
+  var norm = 0.0;
+  for (var i = 0; i < ${PLAINS_OCTAVES}; i = i + 1) {
+    // The same band limit the relief ladder honours, so an octave arriving as
+    // the mesh refines arrives faded rather than stepped (I2).
+    let w = smoothstep(${f(BAND_FADE_LO)}, ${f(BAND_FADE_HI)}, bandLimit / frq);
+    if (w > 0.002) {
+      let n = noised_${s}(dir * frq + vec3<f32>(f32(i) * 19.3 + 101.7));
+      sum = sum + w * amp * n.x;
+      g = g + w * amp * frq * n.yzw;
+    }
+    // Unweighted, so switching an octave off low-passes the swell instead of
+    // rescaling what is left.
+    norm = norm + amp;
+    amp = amp * ${f(PLAINS_GAIN)};
+    frq = frq * ${f(RELIEF_LACUNARITY)};
+  }
+  let k = ${f(PLAINS_AMP)} * gate / norm;
+  var hOut = sum * k;
+  var gOut = g * k;
+
+  // ── aeolian: dune fields ──────────────────────────────────────────────
+  //
+  // See the AEOLIAN_* block in planet.ts. Rides the same flat-land gate — an
+  // erg forms on a plain — with climate on top of it.
+  let arid = 1.0 - smoothstep(${f(AEOLIAN_DRY_LO)}, ${f(AEOLIAN_DRY_HI)}, clim.y);
+  let warm = smoothstep(${f(AEOLIAN_WARM_LO)}, ${f(AEOLIAN_WARM_HI)}, clim.x);
+  let sand = gate * arid * warm;
+  if (sand > 0.002) {
+    // Diagonal scaling of the domain: slower variation along the polar axis,
+    // so crests elongate north-south across the easterly trades. Linear, so
+    // the gradient below is exact — d/ddir of n(S·dir·f) is f·Sᵀ·∇n, and S is
+    // its own transpose.
+    let iy = 1.0 / ${f(AEOLIAN_STRETCH)};
+    var aAmp = 1.0;
+    var aFrq = ${f(AEOLIAN_F0)};
+    var aSum = 0.0;
+    var aG = vec3<f32>(0.0);
+    var aNorm = 0.0;
+    for (var i = 0; i < ${AEOLIAN_OCTAVES}; i = i + 1) {
+      let w = smoothstep(${f(BAND_FADE_LO)}, ${f(BAND_FADE_HI)}, bandLimit / aFrq);
+      if (w > 0.002) {
+        let q = vec3<f32>(dir.x, dir.y * iy, dir.z) * aFrq
+              + vec3<f32>(f32(i) * 5.9 + 313.1);
+        let n = noised_${s}(q);
+        let r = 1.0 - abs(n.x);
+        let sg = select(-1.0, 1.0, n.x >= 0.0);
+        // r², crests up. Mean removed per octave — see RIDGE_MEAN.
+        aSum = aSum + w * aAmp * (r * r - ${f(RIDGE_MEAN)});
+        aG = aG + w * aAmp * (-2.0 * r) * sg * aFrq
+                * vec3<f32>(n.y, n.z * iy, n.w);
+      }
+      aNorm = aNorm + aAmp;
+      aAmp = aAmp * ${f(AEOLIAN_GAIN)};
+      aFrq = aFrq * ${f(RELIEF_LACUNARITY)};
+    }
+    let ak = ${f(AEOLIAN_AMP)} * sand / aNorm;
+    hOut = hOut + aSum * ak;
+    gOut = gOut + aG * ak;
+  }
+
+  return vec4<f32>(hOut, gOut);
+}
+
+
+/**
  * Elevation and its gradient: the baked surface plus amplification.
  *
  * The coarse structure no longer comes from noise. bakeH and bakeG are
@@ -1009,7 +1134,8 @@ ${ampBlock(s)}
  */
 fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
                bakeH: f32, bakeG: vec3<f32>, wet: f32, distAxis: f32,
-               radius: f32, bandLimit: f32, spec: vec2<f32>) -> vec4<f32> {
+               radius: f32, bandLimit: f32, spec: vec2<f32>,
+               clim: vec2<f32>) -> vec4<f32> {
   // dh/ds where s is arc length: the gradient is per unit direction, and a
   // unit of direction is one planet radius of surface.
   let slope = length(bakeG) / radius;
@@ -1108,11 +1234,14 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
   // does not need to be: it is a smooth function of a smooth field, so it
   // refines continuously instead of arriving as new octaves do.
   let ch = channel_${s}(wetE, distAxis);
-  let h0 = (bakeH - ch.x + detail * amp) * hscale;
+  // Plains swell, added rather than folded into amp — it must not scale the
+  // detail ladder, only sit under it. See plainsSwell_.
+  let sw = plainsSwell_${s}(dir, bakeH, slope, wetE, bandLimit, clim);
+  let h0 = (bakeH - ch.x + detail * amp + sw.x) * hscale;
   // The amplitude field varies over the bake's cell size, three orders of
   // magnitude coarser than the detail it scales, so d(amp)/d(dir) is
   // negligible next to amp·d(detail)/d(dir) and is dropped.
-  let g0 = (bakeG + detailG * amp) * hscale;
+  let g0 = (bakeG + detailG * amp + sw.yzw) * hscale;
 
   let h = h0;
   let g = g0;
@@ -1565,7 +1694,7 @@ ${spectrumBlock('S')}
 `);
 
 export const patchSurface = wgslFn(/* wgsl */ `
-fn patchSurface(${ARGS}, baked: vec4<f32>, bake2: vec4<f32>, spec: vec2<f32>) -> vec4<f32> {
+fn patchSurface(${ARGS}, baked: vec4<f32>, bake2: vec4<f32>, spec: vec2<f32>, clim: vec2<f32>) -> vec4<f32> {
   ${UNPACK}
   let m = morphed_N(gpos, gpar, A, B, hs, Pc, lenPc, iBU, iBV,
                     anchorRel, radius, cfg2.z, iMorph, cfg.w);
@@ -1580,7 +1709,7 @@ fn patchSurface(${ARGS}, baked: vec4<f32>, bake2: vec4<f32>, spec: vec2<f32>) ->
   let bandLimit = radius / max(spacing, 0.01);
 
   let hn = height_N(dir, i32(cfg.z), cfg.y, baked.x, baked.yzw, bake2.x, bake2.y,
-                    radius, bandLimit, spec);
+                    radius, bandLimit, spec, clim);
 
   // Surface normal from the tangential component of the height gradient.
   let gT = hn.yzw - dir * dot(dir, hn.yzw);
@@ -2584,9 +2713,6 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   let orbitalBand = smoothstep(120.0, 900.0, mPerPx)
                   * (1.0 - smoothstep(18000.0, 70000.0, mPerPx));
   let orbitalDetail = mesoRaw * orbitalBand;
-  alb = alb * (1.0 + meso * 0.10 + orbitalDetail * 0.18);
-  alb = mix(alb, alb * vec3<f32>(0.86, 0.93, 1.05),
-            clamp(-orbitalDetail, 0.0, 1.0) * 0.16);
   let screeFade = 1.0 - smoothstep(1500.0, 12000.0, mPerPx);
   alb = mix(alb, scree, clast * smoothstep(0.24, 0.52, slopeB) * screeFade
                         * (1.0 - smoothstep(0.30, 0.60, moist)) * 0.40);
@@ -2594,13 +2720,89 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // Canopy. Same cover field the scatter uses, so ground colour and where
   // plants actually stand cannot disagree, and instances can dissolve into
   // this without revealing an edge.
-  let canopy = mix(vec3<f32>(0.036, 0.055, 0.026), vec3<f32>(0.055, 0.080, 0.032), hv);
+  // ── forest type ─────────────────────────────────────────────────────────
+  //
+  // Two axes, because that is what actually separates one forest from another
+  // seen from above. Temperature runs boreal to tropical: a spruce forest is
+  // very dark and slightly blue, a tropical one is lighter and yellower, and
+  // the difference is large enough to see from orbit. Moisture runs dry to
+  // wet: an open dry woodland carries a lot of understorey and bare ground in
+  // its average colour, a rainforest carries none.
+  //
+  // Elevation and slope keep the old hv role on top of that, since montane
+  // forest is sparser and greyer than the same species lower down.
+  let fCold = 1.0 - smoothstep(0.30, 0.62, temp);
+  let fDry = 1.0 - smoothstep(0.28, 0.58, moist);
+  let boreal = vec3<f32>(0.030, 0.046, 0.030);
+  let tropic = vec3<f32>(0.052, 0.078, 0.028);
+  let dryWood = vec3<f32>(0.074, 0.082, 0.044);
+  var canopy = mix(tropic, boreal, fCold);
+  canopy = mix(canopy, dryWood, fDry * 0.55);
+  // Montane thinning: greyer and a little brighter with height and slope.
+  canopy = mix(canopy, canopy * 1.18 + vec3<f32>(0.006), hv * 0.45);
+
+  // ── clearings ───────────────────────────────────────────────────────────
+  //
+  // Density, not colour. A clearing has to show the ground that is actually
+  // under it — the soil, the rock, the meso mottling — or it is just a paler
+  // green patch, which is the thing this is meant to stop.
+  //
+  // Each rung is band-limited by the pixel footprint like the meso ladder, and
+  // each rides one of the rotations that ladder already built, so the clearing
+  // field cannot stack its lattice with the mottling it sits beside.
+  let gc0 = 1.0 - smoothstep(25000.0, 150000.0, mPerPx);
+  let gc1 = 1.0 - smoothstep(9000.0, 55000.0, mPerPx);
+  let gc2 = 1.0 - smoothstep(3000.0, 18000.0, mPerPx);
+  let gc3 = 1.0 - smoothstep(1000.0, 6000.0, mPerPx);
+  var cAcc = 0.0;
+  var cNrm = 1e-3;
+  if (gc0 > 0.004) {
+    cAcc = cAcc + noised_T(rotG * (${f(RADIUS)} / ${f(CANOPY_CLEAR_LAM[0])}) + vec3<f32>(23.9)).x * 0.62 * gc0;
+    cNrm = cNrm + 0.62 * gc0;
+  }
+  if (gc1 > 0.004) {
+    cAcc = cAcc + noised_T(rotF * (${f(RADIUS)} / ${f(CANOPY_CLEAR_LAM[1])}) + vec3<f32>(64.2)).x * 0.52 * gc1;
+    cNrm = cNrm + 0.52 * gc1;
+  }
+  if (gc2 > 0.004) {
+    cAcc = cAcc + noised_T(rotD * (${f(RADIUS)} / ${f(CANOPY_CLEAR_LAM[2])}) + vec3<f32>(9.4)).x * 0.44 * gc2;
+    cNrm = cNrm + 0.44 * gc2;
+  }
+  if (gc3 > 0.004) {
+    cAcc = cAcc + noised_T(rotC * (${f(RADIUS)} / ${f(CANOPY_CLEAR_LAM[3])}) + vec3<f32>(88.6)).x * 0.36 * gc3;
+    cNrm = cNrm + 0.36 * gc3;
+  }
+  // Only ever opens the canopy. Forest that gets *denser* than its climate
+  // allows is not a thing, and letting it close would undo the cover field.
+  let clearing = clamp(-(cAcc / cNrm), 0.0, 1.0);
+  let coverC = clamp(cover * (1.0 - clearing * ${f(CANOPY_CLEAR_K)}), 0.0, 1.0);
+
   let canopyDetail = clamp(1.0 + orbitalDetail * 0.58, 0.58, 1.38);
-  alb = mix(alb, canopy, clamp(cover * canopyDetail, 0.0, 1.0) * (1.0 - snowLine) * 0.92);
+  // Blended to CANOPY_KEEP, not over the top of everything. The ground shows
+  // through a real canopy — through gaps, in the understorey, and in the way
+  // the soil beneath tints what little light comes back out — and keeping a
+  // third of it is what stops every forested continent collapsing to one flat
+  // green from orbit.
+  alb = mix(alb, canopy, clamp(coverC * canopyDetail, 0.0, 1.0)
+                         * (1.0 - snowLine) * ${f(1 - CANOPY_KEEP)});
+  // The detail bands go on *after* the canopy, not before it.
+  //
+  // They used to be applied to the ground and then have 92% of themselves
+  // blended away by the canopy on the next line, so the 5, 16 and 48 km
+  // structure survived only where there were no trees — which is exactly
+  // backwards, since forest is the most texturally varied cover there is.
+  // Applied here they modulate whatever is actually on the surface.
+  alb = alb * (1.0 + meso * 0.10 + orbitalDetail * 0.18);
+  alb = mix(alb, alb * vec3<f32>(0.86, 0.93, 1.05),
+            clamp(-orbitalDetail, 0.0, 1.0) * 0.16);
+
   let materialFade = 1.0 - smoothstep(0.35, 5.0, mPerPx);
   let rockMaterial = smoothstep(0.16, 0.48, slopeB);
-  let sampledAlb = mix(matBase.rgb, matRock.rgb, rockMaterial);
-  alb = mix(alb, sampledAlb, materialFade * 0.62);
+  let baseTexLuma = dot(matBase.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+  let baseTextured = alb * clamp(0.58 + baseTexLuma * 1.25, 0.58, 1.48);
+  baseTextured = mix(baseTextured, matBase.rgb, 0.08);
+  let sampledAlb = mix(baseTextured, matRock.rgb, rockMaterial);
+  alb = mix(alb, sampledAlb, materialFade * 0.72);
   let sampledNR = mix(matBaseNR, matRockNR, rockMaterial);
   let texN = sampledNR.xyz * 2.0 - 1.0;
   var matEast = cross(vec3<f32>(0.0, 1.0, 0.0), up);
@@ -2638,6 +2840,11 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   let materialSpec = materialA2 / max(3.14159265 * materialDen * materialDen, 1e-4);
   let specStrength = mix(0.012, 0.055, groundWet);
   direct = direct + sunCol * sunTr * materialSpec * specStrength * ndl * shadow * cloudLit;
+  let moonDir = -sd;
+  let moonNight = 1.0 - smoothstep(-0.08, 0.02, dot(up, sd));
+  let moonNdl = max(dot(n2, moonDir), 0.0);
+  direct = direct + alb * (1.0 / 3.14159265) * sunCol
+         * vec3<f32>(0.58, 0.68, 1.0) * ${f(MOON_LIGHT)} * moonNdl * moonNight;
 
   let sunUp = max(dot(up, sd), 0.0);
   // The 0.045 is skylight from air the sun has *set* on — the blue that keeps
