@@ -32,6 +32,8 @@ import {
   vec2,
   vec3,
   vec4,
+  int,
+  select,
 } from 'three/tsl';
 import {
   DEFAULT_OCTAVES,
@@ -51,6 +53,14 @@ import {
 import { SHADOW_DEPTH_OFFSET } from './shadows.js';
 import type { PatchBuffers } from './quadtree.js';
 import type { PlanetSurface } from './planetData.js';
+import {
+  LITTER_LAYER,
+  ROCK_LAYER,
+  SAND_LAYER,
+  SNOW_LAYER,
+  SOIL_LAYER,
+  type TerrainMaterials,
+} from './terrainMaterials.js';
 import { ATLAS_PAD } from './bake/cubemap.js';
 import {
   cubeAtlasUV,
@@ -255,7 +265,12 @@ export class TerrainMesh {
    */
   private bakeStep = uniform(0.0028);
 
-  constructor(buffers: PatchBuffers, surface: PlanetSurface, shadowFactor?: ShadowFactor) {
+  constructor(
+    buffers: PatchBuffers,
+    surface: PlanetSurface,
+    materials: TerrainMaterials,
+    shadowFactor?: ShadowFactor,
+  ) {
     // FACE_EDGE/size is the cell's arc length; divide by the radius for the
     // angle. Derived rather than hard-coded so changing the bake resolution
     // cannot silently leave the normals sampling the wrong stencil.
@@ -437,8 +452,8 @@ export class TerrainMesh {
     const surfW = nVec4(nMix(surf.xyz, dir, wetFrac), hOut);
     const position = asVec3(nCall(patchPosition, { ...args, hgt: hOut }));
 
-    const surfV = varying(surfW as never, 'vSurf');
-    const climV = varying(nVec4(clim, signedDepth) as never, 'vClim');
+    const surfV = asVec4(varying(surfW as never, 'vSurf'));
+    const climV = asVec4(varying(nVec4(clim, signedDepth) as never, 'vClim'));
     // Sky view was a lone float, which is three wasted channels of an
     // interpolator. It now carries what the fragment stage needs from the bake
     // and could not otherwise reach: the distance to the drainage axis, and the
@@ -463,11 +478,39 @@ export class TerrainMesh {
     // channels that were sitting at zero.
     const level = varying(nVec4(iAnchor.w, dirSp.w, spec.x, spec.y) as never, 'vLevel');
     const relPos = varying(position, 'vRel');
+    const materialPos = asVec3(relPos.add(this.camSnap));
+    const baseLayer = select(
+      climV.x.lessThan(0.15),
+      int(SNOW_LAYER),
+      select(
+        climV.y.lessThan(0.28),
+        int(SAND_LAYER),
+        select(climV.z.greaterThan(0.72), int(LITTER_LAYER), int(SOIL_LAYER)),
+      ),
+    );
+    const triWeight = asVec3(surfV.xyz.abs().pow(4));
+    const triNorm = triWeight.x.add(triWeight.y).add(triWeight.z).max(1e-5);
+    const tri = (map: TerrainMaterials['albedo'], layer: unknown, pos: Vec3Node) => {
+      const tx = asVec4(texture(map, pos.yz.mul(0.18)).depth(layer as never));
+      const ty = asVec4(texture(map, pos.xz.mul(0.18)).depth(layer as never));
+      const tz = asVec4(texture(map, pos.xy.mul(0.18)).depth(layer as never));
+      return asVec4(tx.mul(triWeight.x).add(ty.mul(triWeight.y)).add(tz.mul(triWeight.z)).div(triNorm));
+    };
+    const baseA = tri(materials.albedo, baseLayer, materialPos);
+    const baseB = tri(materials.albedo, baseLayer, asVec3(materialPos.yzx.mul(1.071).add(vec3(19.1, 7.3, 31.7))));
+    const rockA = tri(materials.albedo, int(ROCK_LAYER), materialPos);
+    const rockB = tri(materials.albedo, int(ROCK_LAYER), asVec3(materialPos.zxy.mul(1.113).add(vec3(43.7, 13.9, 5.1))));
+    const baseAlbedo = asVec4(nMix(baseA, baseB, float(0.5)));
+    const rockAlbedo = asVec4(nMix(rockA, rockB, float(0.5)));
+    const baseNormal = tri(materials.normal, baseLayer, materialPos);
+    const rockNormal = tri(materials.normal, int(ROCK_LAYER), materialPos);
+    const baseRough = tri(materials.roughness, baseLayer, materialPos);
+    const rockRough = tri(materials.roughness, int(ROCK_LAYER), materialPos);
 
     const material = new MeshBasicNodeMaterial();
     material.positionNode = position;
     material.colorNode = asVec3(
-      shadeTerrain({
+      nCall(shadeTerrain, {
         surf: surfV,
         clim: climV,
         camPos: this.camPos,
@@ -481,6 +524,10 @@ export class TerrainMesh {
         skyView: aoV,
         snap: this.camSnap,
         weather: this.weather,
+        matBase: baseAlbedo,
+        matRock: rockAlbedo,
+        matBaseNR: nVec4(baseNormal.xyz, baseRough.x),
+        matRockNR: nVec4(rockNormal.xyz, rockRough.x),
         shadow: shadowFactor ? shadowFactor(relPos) : float(1),
       }),
     );

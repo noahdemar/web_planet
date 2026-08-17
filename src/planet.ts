@@ -1504,6 +1504,67 @@ export const CLOUD_MARCH_PX = 1.0;
 /** Extinction per unit coverage per metre of path. */
 export const CLOUD_SIGMA = 0.0;
 
+/* ── Lightning, seen from orbit ──────────────────────────────────────────
+ *
+ * Separate from the bolts in weather.ts, and it has to be. Those are drawn as
+ * line geometry a few kilometres from the camera with a screen flash behind
+ * them, which is right at ground level and invisible from anywhere else — a
+ * bolt is a couple of hundred metres across and there is nothing to draw by
+ * the time you are in orbit.
+ *
+ * What you *do* see from orbit is real and famous: storm complexes flickering
+ * inside the cloud, each flash lighting a patch of deck tens of kilometres
+ * across for a fraction of a second. That is not a bolt, it is the cloud
+ * acting as a diffuser, so it is drawn the way it actually appears — as light
+ * added inside the deck, gated on there being deck to light.
+ */
+
+/** Storm-cell size, metres. A mesoscale convective complex, not one cell. */
+export const BOLT_CELL = 55_000;
+/**
+ * Mean seconds between flashes *in one active cell*, and the visible decay.
+ *
+ * This is the knob that decides how rare lightning looks, and the first
+ * attempt had it three orders of magnitude too fast. 3.4 seconds per cell
+ * sounds sparse until you count the cells: at orbital range the visible disc
+ * holds on the order of ten thousand of them, a fair fraction of which pass
+ * the convection gate, so a few seconds each adds up to a continuous
+ * scintillation over the whole night side rather than a storm here and there.
+ *
+ * The rate you actually see is (active cells in view) / period, so it has to
+ * be set against the cell count and not against intuition about one storm.
+ * Roughly a thousand cells clear the coverage gate at orbit; BOLT_ACTIVE keeps
+ * a twenty-fifth of those, and half an hour apiece puts the visible rate near
+ * two a minute. It is altitude-dependent by construction — fewer cells are in
+ * frame lower down — which is also true of the real thing.
+ */
+export const BOLT_PERIOD = 10;
+/** Slightly longer than a real return stroke, so a rare flash is catchable. */
+export const BOLT_DECAY = 0.18;
+/**
+ * Fraction of cells that ever fire at all.
+ *
+ * Storms are not uniformly distributed through the convective band — most deep
+ * cloud is not electrically active at any given moment. Gating on a hash keeps
+ * the same cells lit for the whole session rather than making every cell
+ * flicker occasionally, which is both closer to the truth and much rarer.
+ */
+export const BOLT_ACTIVE = 0.05;
+/** Radius of the lit patch, as a fraction of the cell. */
+export const BOLT_GLOW = 0.17;
+/** Emissive strength. */
+export const BOLT_GAIN = 2.6;
+/**
+ * Coverage window a cell needs before it is allowed to flash.
+ *
+ * Lightning is a deep-convection phenomenon, so it belongs to the thick cores
+ * and not to the thin margins. Keying it to the same coverage the deck is
+ * drawn from means the storms light up and the fair-weather cumulus does not,
+ * with no separate storm field to keep in step.
+ */
+export const BOLT_COVER_LO = 0.45;
+export const BOLT_COVER_HI = 0.78;
+
 /** Coarsest moisture octave. RADIUS/3.1 ≈ 2000 km — provinces, not weather. */
 export const BIOME_F0 = 3.1;
 export const BIOME_LACUNARITY = 2.6;
