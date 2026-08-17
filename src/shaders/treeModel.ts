@@ -291,7 +291,7 @@ ${noiseBlock('I')}
  * to snap to a different facing the moment it crossed into an impostor band.
  */
 export const impostorUV = wgslFn(/* wgsl */ `
-fn impostorUV(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>) -> vec2<f32> {
+fn impostorUV(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>) -> vec4<f32> {
   let up = normalize(camPos + inst.xyz);
   var axis = vec3<f32>(0.0, 1.0, 0.0);
   if (abs(up.y) > 0.99) { axis = vec3<f32>(0.0, 0.0, 1.0); }
@@ -307,7 +307,10 @@ fn impostorUV(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>) -> vec2<f32
   // the column it was rendered from.
   let a = 1.5707963 - phi;
   let yaws = ${IMPOSTOR_YAWS.toFixed(1)};
-  let slice = floor(fract(a / 6.2831853 + 0.5 / yaws) * yaws);
+  let yawAt = fract(a / 6.2831853) * yaws;
+  let slice0 = floor(yawAt);
+  let slice1 = floor(fract((slice0 + 1.0) / yaws) * yaws);
+  let yawMix = smoothstep(0.18, 0.82, fract(yawAt));
 
   // Species s owns rows [s, s+1) of the atlas counted from v = 0, because
   // that is the order treeAssets.ts assembles them in.
@@ -320,8 +323,10 @@ fn impostorUV(inst: vec4<f32>, corner: vec2<f32>, camPos: vec3<f32>) -> vec2<f32
   let species = treeSpecies_U(inst);
   let pad = ${IMPOSTOR_PAD.toFixed(4)};
   let span = 1.0 - 2.0 * pad;
-  return vec2<f32>((slice + pad + (corner.x + 0.5) * span) / yaws,
-                   (species + pad + corner.y * span) / sp);
+  let tileX = pad + (corner.x + 0.5) * span;
+  let tileY = (species + pad + corner.y * span) / sp;
+  return vec4<f32>((slice0 + tileX) / yaws, (slice1 + tileX) / yaws,
+                   tileY, yawMix);
 }
 ${frameBlock('U')}
 ${instBlock('U')}

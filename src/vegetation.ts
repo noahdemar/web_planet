@@ -54,6 +54,7 @@ import {
   float,
   instanceIndex,
   int,
+  mix,
   select,
   storage,
   texture as tslTextureNode,
@@ -435,8 +436,10 @@ export class Vegetation {
         // fragment would bleed the neighbouring yaw in along one edge.
         // Built from the varying record, so the tile is a property of the
         // instance rather than of the pixel.
-        const auv = impostorUV({ inst: vInst, corner, camPos: this.camPos });
-        texel = asVec4(tslTextureNode(assets.impostor, auv));
+        const auv = asVec4(impostorUV({ inst: vInst, corner, camPos: this.camPos }));
+        const texel0 = asVec4(tslTextureNode(assets.impostor, vec2(auv.x, auv.z)));
+        const texel1 = asVec4(tslTextureNode(assets.impostor, vec2(auv.y, auv.z)));
+        texel = asVec4(mix(texel0, texel1, auv.w));
         shaded = asVec4(
           shadeImpostor({
             inst: vInst,

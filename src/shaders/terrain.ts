@@ -2799,7 +2799,7 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   let materialFade = 1.0 - smoothstep(0.35, 5.0, mPerPx);
   let rockMaterial = smoothstep(0.16, 0.48, slopeB);
   let baseTexLuma = dot(matBase.rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-  let baseTextured = alb * clamp(0.58 + baseTexLuma * 1.25, 0.58, 1.48);
+  var baseTextured = alb * clamp(0.58 + baseTexLuma * 1.25, 0.58, 1.48);
   baseTextured = mix(baseTextured, matBase.rgb, 0.08);
   let sampledAlb = mix(baseTextured, matRock.rgb, rockMaterial);
   alb = mix(alb, sampledAlb, materialFade * 0.72);
