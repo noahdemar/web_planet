@@ -6,7 +6,14 @@
  * precision jitter, stable frame time.
  */
 
-import { ACESFilmicToneMapping, PerspectiveCamera, Scene, Vector3 } from 'three';
+import {
+  ACESFilmicToneMapping,
+  DirectionalLight,
+  HemisphereLight,
+  PerspectiveCamera,
+  Scene,
+  Vector3,
+} from 'three';
 import { WebGPURenderer } from 'three/webgpu';
 import { MAX_LEVEL, RADIUS, VEG_MODEL_BANDS } from './planet.js';
 import { planetSurface, seedFromLocation } from './planetSource.js';
@@ -31,6 +38,8 @@ import { ShadowInspector } from './shadowDebug.js';
 import { createShadowUniforms, makeShadowFactor } from './shaders/shadowSample.js';
 import { AdaptiveResolution, QUALITY } from './quality.js';
 import { Weather } from './weather.js';
+import { loadTerrainMaterials } from './terrainMaterials.js';
+import { Rocks } from './rocks.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
 
@@ -261,8 +270,17 @@ async function main(): Promise<void> {
   const selector = new PatchSelector(QUALITY.lodFactor);
   selector.setPlanetSurface(surface);
   setPlanetSurface(surface);
-  const terrain = new TerrainMesh(selector.buffers, surface, shadowOf);
+  bootStage.textContent = 'laying terrain materials';
+  const terrainMaterials = await loadTerrainMaterials(renderer.getMaxAnisotropy());
+  const terrain = new TerrainMesh(selector.buffers, surface, terrainMaterials, shadowOf);
   scene.add(terrain.mesh);
+
+  bootStage.textContent = 'placing rock formations';
+  const rocks = await Rocks.load(renderer.getMaxAnisotropy());
+  scene.add(...rocks.meshes);
+  const rockSun = new DirectionalLight(0xfff4df, 2.8);
+  const rockSky = new HemisphereLight(0x7897c4, 0x40362c, 0.65);
+  scene.add(rockSun, rockSky);
 
   const sky = new Sky();
   scene.add(sky.mesh);
@@ -514,6 +532,11 @@ async function main(): Promise<void> {
       camera.projectionMatrix,
     );
     terrain.update(stats.patches);
+    rocks.update(
+      controls.pos as readonly [number, number, number],
+      terrain.octaves,
+      terrain.heightScale,
+    );
 
     // GPU-driven vegetation: upload tiles, then scatter and bin entirely on
     // the GPU. The draw counts are written by the compute pass, so no instance
@@ -766,6 +789,8 @@ async function main(): Promise<void> {
     grass.setSun(sun, sunColour);
     sky.setSun(sun, sunColour);
     clouds.setSun(sun, sunColour);
+    rockSun.position.copy(sun).multiplyScalar(10_000);
+    rockSun.color.setRGB(sunColour.x, sunColour.y, sunColour.z);
   }
   aimSun(sunEl, sunAz);
 

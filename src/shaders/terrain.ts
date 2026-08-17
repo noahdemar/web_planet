@@ -1677,6 +1677,8 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
                 lvl: vec4<f32>, sunDir: vec3<f32>, sunCol: vec3<f32>,
                 mode: f32, grid: f32, cfg3: vec4<f32>, skyView: vec4<f32>,
                 snap: vec3<f32>, weather: vec4<f32>,
+                matBase: vec4<f32>, matRock: vec4<f32>,
+                matBaseNR: vec4<f32>, matRockNR: vec4<f32>,
                 shadow: f32) -> vec3<f32> {
   let n = normalize(surf.xyz);
   let hgt = surf.w;
@@ -1800,7 +1802,7 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // applied to the residual gradient — so the shaded surface is continuous with
   // the displaced one instead of being a different surface laid over it.
   let dnT = dn - up * dot(up, dn);
-  let n2 = normalize(n - dnT / (Rg + hgt));
+  var n2 = normalize(n - dnT / (Rg + hgt));
   let slope = clamp(1.0 - dot(n2, up), 0.0, 1.0);
 
   // ── aspect ────────────────────────────────────────────────────────────
@@ -2595,8 +2597,23 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   let canopy = mix(vec3<f32>(0.036, 0.055, 0.026), vec3<f32>(0.055, 0.080, 0.032), hv);
   let canopyDetail = clamp(1.0 + orbitalDetail * 0.58, 0.58, 1.38);
   alb = mix(alb, canopy, clamp(cover * canopyDetail, 0.0, 1.0) * (1.0 - snowLine) * 0.92);
+  let materialFade = 1.0 - smoothstep(0.35, 5.0, mPerPx);
+  let rockMaterial = smoothstep(0.16, 0.48, slopeB);
+  let sampledAlb = mix(matBase.rgb, matRock.rgb, rockMaterial);
+  alb = mix(alb, sampledAlb, materialFade * 0.62);
+  let sampledNR = mix(matBaseNR, matRockNR, rockMaterial);
+  let texN = sampledNR.xyz * 2.0 - 1.0;
+  var matEast = cross(vec3<f32>(0.0, 1.0, 0.0), up);
+  let matEastLen = length(matEast);
+  matEast = select(vec3<f32>(1.0, 0.0, 0.0), matEast / max(matEastLen, 1e-5), matEastLen > 1e-4);
+  let matNorth = normalize(cross(up, matEast));
+  let matPerturb = matEast * texN.x + matNorth * texN.y + n2 * (texN.z - 1.0);
+  n2 = normalize(n2 + matPerturb * materialFade * 0.42);
+  let unresolvedVariance = (1.0 - materialFade) * 0.16 + max(mPerPx - 0.5, 0.0) * 0.002;
+  var surfaceRough = clamp(sqrt(sampledNR.w * sampledNR.w + unresolvedVariance), 0.09, 0.98);
   let groundWet = weather.x * (1.0 - snowLine) * (1.0 - waterMix);
   alb = alb * mix(1.0, 0.58, groundWet);
+  surfaceRough = mix(surfaceRough, 0.12, groundWet);
 
   if (mode > 4.5 && mode < 5.5) {
     // Raw albedo, unlit — separates "the surface is the wrong colour" from
@@ -2615,12 +2632,12 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   var direct = alb * (1.0 / 3.14159265) * sunCol * sunTr * ndl * soft * shadow * cloudLit;
   let eye = normalize(-rel);
   let halfV = normalize(eye + sd);
-  let wetRough = mix(0.62, 0.12, groundWet);
-  let wetA2 = wetRough * wetRough * wetRough * wetRough;
-  let wetNh = max(dot(n2, halfV), 0.0);
-  let wetDen = wetNh * wetNh * (wetA2 - 1.0) + 1.0;
-  let wetSpec = wetA2 / max(3.14159265 * wetDen * wetDen, 1e-4);
-  direct = direct + sunCol * sunTr * wetSpec * groundWet * 0.055 * ndl * shadow * cloudLit;
+  let materialA2 = surfaceRough * surfaceRough * surfaceRough * surfaceRough;
+  let materialNh = max(dot(n2, halfV), 0.0);
+  let materialDen = materialNh * materialNh * (materialA2 - 1.0) + 1.0;
+  let materialSpec = materialA2 / max(3.14159265 * materialDen * materialDen, 1e-4);
+  let specStrength = mix(0.012, 0.055, groundWet);
+  direct = direct + sunCol * sunTr * materialSpec * specStrength * ndl * shadow * cloudLit;
 
   let sunUp = max(dot(up, sd), 0.0);
   // The 0.045 is skylight from air the sun has *set* on — the blue that keeps

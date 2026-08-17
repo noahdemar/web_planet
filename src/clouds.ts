@@ -30,6 +30,14 @@ import { DoubleSide, Mesh, SphereGeometry, Vector3, Vector4 } from 'three';
 import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { normalLocal, positionLocal, uniform, varying, vec3, vec4, wgslFn } from 'three/tsl';
 import {
+  BOLT_ACTIVE,
+  BOLT_CELL,
+  BOLT_COVER_HI,
+  BOLT_COVER_LO,
+  BOLT_DECAY,
+  BOLT_GAIN,
+  BOLT_GLOW,
+  BOLT_PERIOD,
   CLOUD_ALT,
   CLOUD_MARCH,
   CLOUD_MARCH_PX,
@@ -240,8 +248,79 @@ fn cloudShade(dirIn: vec3<f32>, camPos: vec3<f32>, sunDir: vec3<f32>,
             * (0.25 * twilight + 0.75 * ndl);
   col = mix(col, ciCol, clamp(ci * (1.0 - cu) * 0.8, 0.0, 1.0));
 
+  // ── lightning ───────────────────────────────────────────────────────────
+  //
+  // Added before the air, so a flash on the far side of the planet is dimmed
+  // and reddened by the atmosphere it is shining through exactly as the cloud
+  // around it is. Added rather than blended: it is a light source inside the
+  // deck, not a change to how opaque the deck is.
+  col = col + bolt_C(dir, t, cu);
+
   col = aerial_C(col, camPos, wp, sd, Rg, sunCol);
   return vec4<f32>(col, alpha);
+}
+/**
+ * Storm-cell lightning. See the lightning block in planet.ts.
+ *
+ * One hash per cell decides when that cell fires and where inside itself the
+ * flash sits, so the field is a scatter of independent storms rather than a
+ * grid pulsing in unison — and jittering the centre is what stops the cell
+ * lattice being visible, since a flash is a round glow and never fills its
+ * cell.
+ *
+ * The pulse is a hard onset and an exponential decay, which is what a flash
+ * looks like and is also why it reads as lightning rather than as a blinking
+ * light: the eye is far more sensitive to the asymmetry than to the duration.
+ */
+fn bolt_C(dir: vec3<f32>, t: f32, cu: f32) -> vec3<f32> {
+  // Only deep convection gets to flash.
+  let deep = smoothstep(${BOLT_COVER_LO.toFixed(4)}, ${BOLT_COVER_HI.toFixed(4)}, cu);
+  if (deep <= 0.002) { return vec3<f32>(0.0); }
+
+  let k = ${RADIUS.toFixed(1)} / ${BOLT_CELL.toFixed(1)};
+  let base = floor(dir * k);
+
+  // The 27 cells around this point, not just the one it lands in.
+  //
+  // A flash is a glow centred on a jittered point inside its cell, and a glow
+  // is wider than the jitter, so it routinely spills across a cell boundary.
+  // Evaluating only the cell the pixel falls in cuts every one of those spills
+  // off dead straight at the boundary — the flashes came out as hard-edged
+  // rectangles tiling a grid, which is the giveaway for exactly this mistake
+  // in any cellular field. Neighbours have to be visited for the glow to close
+  // up into a disc.
+  //
+  // The cost is bounded by the early-out above: only pixels with deep
+  // convection under them get this far, and inside the loop a cell that is not
+  // electrically active costs one hash and nothing else.
+  var acc = 0.0;
+  for (var ix = -1; ix <= 1; ix = ix + 1) {
+    for (var iy = -1; iy <= 1; iy = iy + 1) {
+      for (var iz = -1; iz <= 1; iz = iz + 1) {
+        let cell = base + vec3<f32>(f32(ix), f32(iy), f32(iz));
+        let h = hash33_C(cell);
+        // Only a few cells are ever electrically active; the rest are cloud.
+        if (h.z < ${(1 - BOLT_ACTIVE).toFixed(4)}) { continue; }
+
+        // Jittered centre, so neither the flash nor its glow lines up with
+        // the grid the cells were cut on.
+        let centre = normalize((cell + vec3<f32>(0.5) + (h - vec3<f32>(0.5)) * 0.8) / k);
+        let dist = length(dir - centre) * ${RADIUS.toFixed(1)};
+        let glow = exp(-pow(dist / (${BOLT_CELL.toFixed(1)} * ${BOLT_GLOW.toFixed(4)}), 2.0));
+        if (glow <= 0.004) { continue; }
+
+        // Each cell keeps its own clock, so storms are not synchronised.
+        let period = ${BOLT_PERIOD.toFixed(4)} * (0.85 + 0.3 * h.x);
+        let u = fract(t / period + h.y);
+        // Hard onset, exponential decay.
+        acc = acc + exp(-u * period / ${BOLT_DECAY.toFixed(4)}) * glow;
+      }
+    }
+  }
+  if (acc <= 0.0) { return vec3<f32>(0.0); }
+
+  // Slightly blue-white: a flash is hotter than sunlight.
+  return vec3<f32>(0.82, 0.88, 1.0) * (acc * deep * ${BOLT_GAIN.toFixed(4)});
 }
 ${noiseBlock('C')}
 ${cloudFieldBlock('C')}
