@@ -18,13 +18,20 @@
  * LOD here changes *representation*, not triangle count. Decimating aggregate
  * geometry deletes leaves and thins the canopy, which is exactly why Nanite
  * needed a separate voxel path for foliage (SPEC.md §8).
+ *
+ * What an instance *is* comes from treeAssets.ts now: scanned tree models near
+ * the camera, and impostors baked from those same models further out. The
+ * substrate is unchanged — the scatter still writes 16 bytes per instance and
+ * the CPU still never touches one — but binning gained a second axis. A band
+ * is one indirect draw, an indirect draw is one geometry, and a geometry is
+ * one species, so the two geometry distances are each split conifer/broadleaf
+ * and the scatter picks the band from distance *and* the instance's species.
  */
 
 import {
   BufferAttribute,
   BufferGeometry,
   DoubleSide,
-  FrontSide,
   Mesh,
   Vector3,
   Vector4,
@@ -46,8 +53,10 @@ import {
   dot as tslDot,
   float,
   instanceIndex,
+  int,
   select,
   storage,
+  texture as tslTextureNode,
   uint,
   uniform,
   varying,
@@ -65,106 +74,71 @@ import {
   SEA_BAND,
   SEA_LEVEL,
   FOREST_DENSITY,
-  VEG_BAND_CAPACITY,
+  VEG_BAND_BASE,
+  VEG_BAND_SLOTS,
   VEG_BANDS,
   VEG_CAPACITY,
+  VEG_DIST_BANDS,
+  VEG_MODEL_BANDS,
+  VEG_MODEL_LODS,
+  VEG_SPECIES,
   VEG_CELLS,
   VEG_FADE_START,
   VEG_MIN_PIXELS,
   VEG_RANGE,
 } from './planet.js';
+import { vegSample } from './shaders/vegetation.js';
 import {
-  billboard,
-  shadeTree,
-  shadeVegetation,
-  treeNormal,
-  treeVertex,
-  vegSample,
-} from './shaders/vegetation.js';
+  impostorUV,
+  impostorVertex,
+  instSpecies,
+  modelNormal,
+  modelVertex,
+  shadeImpostor,
+  shadeTreeModel,
+} from './shaders/treeModel.js';
+import type { TreeAssets } from './treeAssets.js';
 
 type Vec3Node = ReturnType<typeof vec3>;
 type Vec4Node = ReturnType<typeof vec3>['xyzz'];
 const asVec3 = (n: unknown): Vec3Node => n as Vec3Node;
 const asVec4 = (n: unknown): Vec4Node => n as Vec4Node;
+type UintNode = ReturnType<typeof uint>;
+const asUint = (n: unknown): UintNode => n as UintNode;
+type FloatNode = ReturnType<typeof float>;
+const asFloat = (n: unknown): FloatNode => n as FloatNode;
 
 /** Returns a scalar node in [0,1]: the fraction of sun reaching a point. */
 export type ShadowFactor = (rel: unknown) => ReturnType<typeof float>;
 
 const BANDS = VEG_BANDS.length;
+const DISTS = VEG_DIST_BANDS.length;
 const CELLS_SQ = VEG_CELLS * VEG_CELLS;
 /** Indirect draw args are 5 u32: indexCount, instanceCount, firstIndex, baseVertex, firstInstance. */
 const ARGS = 5;
 
 /**
- * Instance geometry, origin at the base so plants sit on the ground.
+ * The impostor quad.
  *
- * `planes` = 0 gives one camera-facing quad. Any higher count gives that many
- * fixed-orientation quads crossed evenly about the vertical, which is what
- * makes a close tree hold up: a single facing quad has no parallax against its
- * neighbours and slides as the camera moves.
+ * One camera-facing quad and nothing else. The crossed-plane variant this used
+ * to carry — three fixed quads about the vertical, so a close tree had real
+ * parallax — is gone with the band it served: the mid band draws the model
+ * itself now, and crossing three copies of a *photograph* of a tree gives you
+ * three visibly intersecting cut-outs rather than depth.
+ *
+ * `corner` is the position in the baked box, x in [-0.5, 0.5] and y in [0, 1];
+ * `quv` is the same span as a texture coordinate, which the shading uses for
+ * its occlusion and form terms. The atlas lookup is not this uv — it depends
+ * on the view direction, and impostorUV builds it.
  */
-function quadGeometry(planes = 0): BufferGeometry {
+function quadGeometry(): BufferGeometry {
   const g = new BufferGeometry();
-  const n = Math.max(1, planes);
-  const corner: number[] = [];
-  const quv: number[] = [];
-  const idx: number[] = [];
-
-  for (let p = 0; p < n; p++) {
-    // Negative marks the camera-facing case; the shader branches on the sign.
-    const angle = planes === 0 ? -1 : (p * Math.PI) / n;
-    const base = p * 4;
-    corner.push(-0.5, 0, 0.5, 0, 0.5, 1, -0.5, 1);
-    quv.push(0, 0, angle, 1, 0, angle, 1, 1, angle, 0, 1, angle);
-    idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
-  }
+  const corner = [-0.5, 0, 0.5, 0, 0.5, 1, -0.5, 1];
+  const quv = [0, 0, 1, 0, 1, 1, 0, 1];
+  const idx = [0, 1, 2, 0, 2, 3];
 
   g.setAttribute('corner', new BufferAttribute(new Float32Array(corner), 2));
-  g.setAttribute('quv', new BufferAttribute(new Float32Array(quv), 3));
-  g.setIndex(new BufferAttribute(new Uint32Array(idx), 1));
-  return g;
-}
-
-/**
- * A tree, as a surface of revolution the vertex shader gives a shape to.
- *
- * The mesh carries no shape of its own — only (u, θ, isTrunk) per vertex. The
- * radius and height profile is evaluated in the shader from a per-instance
- * species hash, so one geometry covers conifers and broadleaves, every size,
- * and a different crown wobble per tree, with nothing per-instance uploaded
- * beyond the 16 bytes the scatter already writes.
- *
- * Two sleeves: a tapered bole and a canopy that closes to a point at the top.
- * 7 sides is deliberate — an even count lines the silhouette up with itself
- * when trees are seen in rows, and 7 is enough that a crown reads as round at
- * the ranges this band covers.
- */
-function treeGeometry(segs: number, trunkRings: number, canopyRings: number): BufferGeometry {
-  const g = new BufferGeometry();
-  const tsec: number[] = [];
-  const idx: number[] = [];
-  let base = 0;
-
-  const sleeve = (rings: number, kind: number): void => {
-    for (let i = 0; i <= rings; i++) {
-      for (let j = 0; j < segs; j++) tsec.push(i / rings, (j / segs) * Math.PI * 2, kind);
-    }
-    for (let i = 0; i < rings; i++) {
-      for (let j = 0; j < segs; j++) {
-        const a = base + i * segs + j;
-        const b = base + i * segs + ((j + 1) % segs);
-        // Wound so the face normal is cross(dθ, du) — outward, matching what
-        // `treeNormal` returns. The other order culls every front face and
-        // leaves you looking at the inside of the tree.
-        idx.push(a, b + segs, a + segs, a, b, b + segs);
-      }
-    }
-    base += (rings + 1) * segs;
-  };
-  sleeve(trunkRings, 1);
-  sleeve(canopyRings, 0);
-
-  g.setAttribute('tsec', new BufferAttribute(new Float32Array(tsec), 3));
+  g.setAttribute('quv', new BufferAttribute(new Float32Array(quv), 2));
   g.setIndex(new BufferAttribute(new Uint32Array(idx), 1));
   return g;
 }
@@ -172,6 +146,8 @@ function treeGeometry(segs: number, trunkRings: number, canopyRings: number): Bu
 export interface VegStats {
   tiles: number;
   perBand: number[];
+  /** What the scatter *wanted* per band, before the capacity clamp. */
+  rawPerBand: number[];
   total: number;
   candidates: number;
   overflow: boolean;
@@ -184,6 +160,7 @@ export class Vegetation {
   readonly stats: VegStats = {
     tiles: 0,
     perBand: new Array(BANDS).fill(0),
+    rawPerBand: new Array(BANDS).fill(0),
     total: 0,
     candidates: 0,
     overflow: false,
@@ -237,7 +214,13 @@ export class Vegetation {
   private scatterPass: ComputeNode;
   private enabled = true;
 
-  constructor(shadowFactor?: ShadowFactor) {
+  /**
+   * @param assets Models and the baked impostor atlas. Required, and taken as
+   *   a constructor argument rather than loaded here, because the geometry and
+   *   the textures are compiled into the node materials below — there is no
+   *   point at which this class could swap them afterwards.
+   */
+  constructor(assets: TreeAssets, shadowFactor?: ShadowFactor) {
     const tiles = storage(this.tileAttr, 'vec4', MAX_VEG_TILES * VEG_TILE_VEC4).toReadOnly();
     const insts = storage(this.instAttr, 'vec4', VEG_CAPACITY);
     const counters = storage(this.argsAttr, 'uint', BANDS * ARGS).toAtomic();
@@ -289,36 +272,59 @@ export class Vegetation {
         // negative.
         const sScale = s.w.floor().mul(0.125);
         If(sScale.greaterThan(0), () => {
-          // Band by distance. The camera is at the origin, so the instance
-          // position is also the view vector — no subtraction needed.
+          // Bin by distance, then by species. The camera is at the origin, so
+          // the instance position is also the view vector — no subtraction.
           const d = s.xyz.length();
-          // Built from VEG_BANDS rather than written out, so adding a band is
-          // a one-line change here instead of a nested select nobody notices
-          // is still three deep.
-          let bandN: unknown = uint(BANDS - 1);
-          for (let k = BANDS - 2; k >= 0; k--) {
-            bandN = select(d.greaterThan(float(VEG_BANDS[k].maxDist)), bandN as never, uint(k));
+          // Built from VEG_DIST_BANDS rather than written out, so adding a
+          // distance is a one-line change here instead of a nested select
+          // nobody notices is still three deep.
+          let distN: unknown = uint(DISTS - 1);
+          for (let k = DISTS - 2; k >= 0; k--) {
+            distN = select(d.greaterThan(float(VEG_DIST_BANDS[k])), distN as never, uint(k));
           }
-          const band = bandN as ReturnType<typeof uint>;
+          const dist = asUint(distN);
 
-          // Cull by projected size, not only by distance.
+          // The species split, and why it lives here rather than in the draw.
           //
-          // The billboard already fades an instance out below
-          // VEG_MIN_PIXELS * 0.35 — it is stored, binned, drawn and then
-          // multiplied by zero. Rejecting it here instead is free visually and
-          // is what pays for a longer range: sizes follow an inverse-J
-          // distribution, so past a few hundred metres the overwhelming
-          // majority of instances are saplings contributing nothing, while the
-          // handful of large trees are exactly what you see across open water.
+          // A band is one indirect draw, one draw is one geometry, and a
+          // scanned conifer and a scanned broadleaf are not the same geometry.
+          // The alternative — merging every species into one mesh and
+          // collapsing the vertices of the wrong one to a point — costs the
+          // whole vertex count of every species on every instance, which for
+          // two models is a doubling of the near band for nothing.
+          //
+          // So the geometry distances each become two bands, and the impostor
+          // distances stay one apiece: the species there picks a *row of the
+          // atlas*, which costs nothing, not a draw.
+          const sp = asUint(asFloat(instSpecies({ inst: s })).toUint());
+          const band = asUint(
+            select(
+              dist.lessThan(uint(VEG_MODEL_LODS)) as never,
+              dist.mul(uint(VEG_SPECIES)).add(sp) as never,
+              dist.add(uint(VEG_MODEL_BANDS - VEG_MODEL_LODS)) as never,
+            ),
+          );
+
           const px = sScale.mul(this.fadeCfg.z).div(d.max(float(1)));
           If(
-            d.lessThan(float(VEG_BANDS[BANDS - 1].maxDist))
+            d.lessThan(float(VEG_RANGE))
               .and(px.greaterThan(float(VEG_MIN_PIXELS * 0.35))),
             () => {
             const slot = atomicAdd(counters.element(band.mul(ARGS).add(1)), uint(1));
-            // Equal band capacities make the base plain arithmetic.
-            If(slot.lessThan(uint(VEG_BAND_CAPACITY)), () => {
-              insts.element(band.mul(uint(VEG_BAND_CAPACITY)).add(slot)).assign(s);
+            // Bands have their own sizes now, so the base and the ceiling are
+            // lookups rather than arithmetic. Built as select chains over the
+            // compile-time table for the same reason the distance binning is:
+            // six entries resolve to five selects, which is cheaper than a
+            // buffer read and keeps the table the single source of truth.
+            let baseN: unknown = uint(VEG_BAND_BASE[BANDS - 1]);
+            let capN: unknown = uint(VEG_BAND_SLOTS[BANDS - 1]);
+            for (let k = BANDS - 2; k >= 0; k--) {
+              const hit = band.equal(uint(k)) as never;
+              baseN = select(hit, uint(VEG_BAND_BASE[k]) as never, baseN as never);
+              capN = select(hit, uint(VEG_BAND_SLOTS[k]) as never, capN as never);
+            }
+            If(slot.lessThan(asUint(capN)), () => {
+              insts.element(asUint(baseN).add(slot)).assign(s);
             });
           });
         });
@@ -332,29 +338,21 @@ export class Vegetation {
     // `indirect-first-instance` feature.
     for (let b = 0; b < BANDS; b++) {
       // What an instance *is* changes with the band, which is the whole point
-      // of binning them (SPEC.md §8). The near band is real geometry — a bole
-      // and a crown, ~510 triangles; the mid band is crossed quads, which have
-      // enough parallax to hold up at 45–220 m; the far band is one
-      // camera-facing quad.
+      // of binning them (SPEC.md §8). The two nearest distances draw the
+      // scanned model — its near LOD out to 45 m, its low LOD to 110 m — and
+      // everything past that is an impostor quad carrying a baked photograph
+      // of the same model from the nearest of eight yaws.
       //
-      // 16 radial segments, not 7, and the reason is Nyquist rather than
-      // taste. `treeRH_` shapes the crown with wobble terms at 3θ and 5θ; five
-      // cycles around the trunk need more than ten samples to be resolved at
-      // all, and seven undersamples them. The mesh was not drawing a lobed
-      // crown coarsely — it was drawing the *alias* of one, which is why a
-      // close tree read as a lumpy heptagon whose facets swam as you walked
-      // round it. The profile always had the detail; the tessellation was
-      // throwing it away.
-      //
-      // Deliberately *only* the tessellation. The mid band's billboards carry
-      // their own silhouette in `shadeVegetation`, and the two have to agree
-      // across the 45 m handover — so resolving the existing profile is safe
-      // where changing it is not.
-      //
-      // Cost is bounded by the band, not the forest: ~350 instances at 512
-      // triangles is 180k, against ~4.2M in the frame at ground level.
-      const isTree = b === 0;
-      const geo = isTree ? treeGeometry(16, 4, 12) : quadGeometry(b === 1 ? 3 : 0);
+      // The geometry distances are shorter than the 130 m the procedural tree
+      // held, and that is the honest cost of real models: 512 triangles became
+      // 2.2–4.8k. What buys it back is that the thing on the far side of the
+      // handover is no longer a different tree. The old boundary swapped a
+      // modelled crown for a procedural silhouette that agreed with it only in
+      // gross proportion; this one swaps a model for a picture of itself.
+      const spec = VEG_BANDS[b];
+      const geo = spec.model
+        ? assets.geometries[spec.lod][spec.species]
+        : quadGeometry();
       geo.indirect = this.argsAttr;
       geo.indirectOffset = b * ARGS * 4; // bytes
 
@@ -370,67 +368,112 @@ export class Vegetation {
       (this.argsAttr.array as Uint32Array)[b * ARGS] = geo.getIndex()!.count;
 
       const readInsts = storage(this.instAttr, 'vec4', VEG_CAPACITY).toReadOnly();
-      const inst = asVec4(readInsts.element(uint(b * VEG_BAND_CAPACITY).add(instanceIndex)));
+      const inst = asVec4(readInsts.element(uint(VEG_BAND_BASE[b]).add(instanceIndex)));
+      /**
+       * The instance record, hoisted into a varying for everything downstream
+       * of the vertex shader.
+       *
+       * `inst` is a storage read indexed by `instanceIndex`, and that index
+       * only exists while the vertex stage is running. Anything evaluated per
+       * fragment has to go through this, not through `inst` — reading the raw
+       * node there compiles and runs and returns a different record for every
+       * pixel, which is how the impostor lookup came to smear a whole row of
+       * the atlas across each quad instead of picking one tile out of it.
+       */
+      const vInst = asVec4(varying(inst, `vInst${b}`));
+      const shadow = shadowFactor ? shadowFactor(inst.xyz) : float(1);
 
       const mat = new MeshBasicNodeMaterial();
       let shaded: Vec4Node;
-      if (isTree) {
-        const tsec = asVec3(attribute('tsec', 'vec3'));
-        mat.positionNode = asVec3(
-          treeVertex({ inst, tsec, camPos: this.camPos, fadeCfg: this.fadeCfg }),
+      /** Base colour and coverage, whatever the band reads it from. */
+      let texel: Vec4Node;
+      if (spec.model) {
+        const pos = asVec3(attribute('position', 'vec3'));
+        const nrmA = asVec3(attribute('normal', 'vec3'));
+        const leaf = attribute('leaf', 'float');
+        // One sampler for bark and leaves both. The layer is a vertex
+        // attribute rather than a uniform because a band draws every material
+        // of its model in the same pass — see treeAssets.ts.
+        texel = asVec4(
+          tslTextureNode(assets.albedo, attribute('uv', 'vec2')).depth(
+            int(attribute('layer', 'float') as never) as never,
+          ),
         );
-        const nrm = asVec3(treeNormal({ inst, tsec, camPos: this.camPos }));
+        mat.positionNode = asVec3(modelVertex({ inst, pos, camPos: this.camPos }));
+        const nrm = asVec3(modelNormal({ inst, nrm: nrmA, camPos: this.camPos }));
         shaded = asVec4(
-          shadeTree({
-            inst: varying(inst, `vInst${b}`),
+          shadeTreeModel({
+            inst: vInst,
             nrm: varying(nrm, `vNrm${b}`),
-            kind: varying(tsec.z, `vKind${b}`),
-            uu: varying(tsec.x, `vU${b}`),
+            texel,
+            leaf: varying(leaf, `vLeaf${b}`),
+            // Model space is unit height with the base at zero, so the y of
+            // the untransformed vertex *is* the fraction of the way up the
+            // tree the occlusion term wants.
+            hUp: varying(pos.y, `vUp${b}`),
             camPos: this.camPos,
             sunDir: this.sun,
             sunCol: this.sunCol,
             mode: this.mode,
             cfg: this.cfg,
-            shadow: shadowFactor ? shadowFactor(inst.xyz) : float(1),
+            shadow,
           }),
         );
       } else {
         const corner = attribute('corner', 'vec2');
-        const quv = attribute('quv', 'vec3');
+        const quv = attribute('quv', 'vec2');
         mat.positionNode = asVec3(
-          billboard({
+          impostorVertex({
             inst,
             corner,
             camPos: this.camPos,
             fadeCfg: this.fadeCfg,
-            plane: asVec3(quv).z,
           }),
         );
+        // The atlas lookup has to be built in the vertex shader and carried
+        // across: it selects a *tile*, and a tile boundary interpolated per
+        // fragment would bleed the neighbouring yaw in along one edge.
+        // Built from the varying record, so the tile is a property of the
+        // instance rather than of the pixel.
+        const auv = impostorUV({ inst: vInst, corner, camPos: this.camPos });
+        texel = asVec4(tslTextureNode(assets.impostor, auv));
         shaded = asVec4(
-          shadeVegetation({
-            inst: varying(inst, `vInst${b}`),
-            uv: asVec3(varying(quv, `vUv${b}`)).xy,
+          shadeImpostor({
+            inst: vInst,
+            texel,
+            uv: varying(quv, `vUv${b}`),
+            band: float(b),
             camPos: this.camPos,
             sunDir: this.sun,
             sunCol: this.sunCol,
-            band: float(b),
             mode: this.mode,
             cfg: this.cfg,
-            shadow: shadowFactor ? shadowFactor(inst.xyz) : float(1),
+            shadow,
           }),
         );
       }
       mat.colorNode = asVec3(shaded.xyz);
       mat.opacityNode = shaded.w;
       // Alpha-to-coverage rather than a hard cutout: MSAA then resolves the
-      // crown outline, which is where most of the foliage crawl came from.
-      // The tree band is solid geometry with alpha 1, so it does not need it —
-      // and must not have it, or MSAA dithers a surface that has no edge.
+      // outline, which is where most of the foliage crawl came from.
+      //
+      // Every band wants it now. It used to be off for the near band on the
+      // grounds that a procedural tree is a closed surface with alpha 1 and
+      // dithering it would only add noise — but a scanned tree is not a closed
+      // surface. It is a bole plus a few hundred alpha-cut leaf cards, and
+      // those cards are exactly the geometry the argument was protecting.
       mat.transparent = false;
-      mat.alphaToCoverage = !isTree;
-      // Real trees are closed surfaces and want backface culling; the quads
-      // are single-sided sheets and would vanish from behind.
-      mat.side = isTree ? FrontSide : DoubleSide;
+      mat.alphaToCoverage = true;
+      // No alphaTest on top of it. The shading already resolves the cutout —
+      // it sharpens the scan's soft alpha to a one-pixel edge and discards
+      // what falls outside — and a fixed test applied to *that* would clip the
+      // antialiased edge back off, which is the whole thing coverage is here
+      // to keep. The depth pass is the exception and does want a hard test;
+      // see below.
+      // Leaf cards are single-sided sheets and would vanish from behind, and
+      // the models mark themselves double-sided for that reason. The boles pay
+      // for it too; that is cheaper than a second draw to separate them.
+      mat.side = DoubleSide;
 
       // Depth pass: same vertex path, distance along the light as the payload.
       const depthMat = new MeshBasicNodeMaterial();
@@ -439,7 +482,12 @@ export class Vegetation {
       depthMat.colorNode = asVec3(
         vec3(tslDot(inst.xyz, this.shadowSun).add(float(SHADOW_DEPTH_OFFSET))),
       );
-      depthMat.side = isTree ? FrontSide : DoubleSide;
+      // Leaf cards have to cut out in the depth pass too, or every tree casts
+      // the shadow of a solid box and the ground under a canopy goes flat
+      // black instead of dappled.
+      depthMat.opacityNode = texel.w;
+      depthMat.alphaTest = 0.4;
+      depthMat.side = DoubleSide;
       this.depthMaterials.push(depthMat);
 
       const mesh = new Mesh(geo, mat);
@@ -555,15 +603,18 @@ export class Vegetation {
     const buf = await renderer.getArrayBufferAsync(this.argsAttr);
     const u = new Uint32Array(buf);
     const out: number[] = [];
+    const rawOut: number[] = [];
     let total = 0;
     let overflow = false;
     for (let b = 0; b < BANDS; b++) {
       const raw = u[b * ARGS + 1];
-      const c = Math.min(raw, VEG_BAND_CAPACITY);
-      if (raw > VEG_BAND_CAPACITY) overflow = true;
+      const c = Math.min(raw, VEG_BAND_SLOTS[b]);
+      if (raw > VEG_BAND_SLOTS[b]) overflow = true;
       out.push(c);
+      rawOut.push(raw);
       total += c;
     }
+    this.stats.rawPerBand = rawOut;
     this.stats.perBand = out;
     this.stats.total = total;
     this.stats.overflow = overflow;

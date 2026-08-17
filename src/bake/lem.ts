@@ -29,6 +29,7 @@
 
 import { type Grid } from './grid.js';
 import { MinHeap } from './heap.js';
+import { noise3 } from '../heightCPU.js';
 
 export interface LemParams {
   /** Erodibility, yr⁻¹ scaled by the area exponent. Sets total relief. */
@@ -78,6 +79,38 @@ export interface LemParams {
    * nothing would ever incise.
    */
   flexure: number;
+  /**
+   * Damping for the super-time-stepped diffusion, and the stage ceiling.
+   *
+   * See `diffuseSchedule`. Damping trades stability margin for speed: at
+   * nu → 0 an s-stage cycle covers s² explicit steps but sits exactly on the
+   * stability boundary, which a *nonlinear* operator like this one will not
+   * tolerate. 0.05 gives up perhaps a third of the theoretical speedup and
+   * buys a real margin.
+   *
+   * Validated against plain explicit sub-stepping at 512, where the model
+   * needs 6.8 explicit steps and this needs 6 damped ones:
+   *
+   *              land mean   max     >4 km    vs explicit
+   *   explicit     729.1 m   7740 m  1.42%    —
+   *   nu = 0.05    731.1 m   7779 m  1.44%    rms 39 m, 0.087% of cells > 500 m
+   *   nu = 0.15    729.7 m   7770 m  1.42%    rms 22 m, 0.028% of cells > 500 m
+   *   nu = 0.35    729.0 m   7739 m  1.42%    rms 18 m, 0.018% of cells > 500 m
+   *
+   * The aggregates hold at every damping, which is the check that matters:
+   * an unstable diffusion shows up as relief that is *added*, and none is. The
+   * per-cell differences are drainage captures flipping at ridge lines, which
+   * this model is chaotic about — the same seed with any perturbation moves
+   * them. 0.15 is the knee.
+   *
+   * The win is small here and grows with resolution, because the explicit
+   * scheme needs sub-steps proportional to res² and this needs them
+   * proportional to res: 7 against 6 at 512, but 27 against 12 at 1024.
+   *
+   * Set stsMaxStages to 1 to fall back to plain explicit sub-stepping.
+   */
+  stsDamping: number;
+  stsMaxStages: number;
   /** Elevation above which the absolute envelope starts to compress, metres. */
   ceilingSoft: number;
   /** Asymptotic maximum elevation, metres. Earth's is 8848. */
@@ -93,6 +126,8 @@ export const DEFAULT_LEM: LemParams = {
   diffuseCourant: 0.35,
   steps: 140,
   rerouteEvery: 6,
+  stsDamping: 0.15,
+  stsMaxStages: 32,
   isostasy: 0.83,
   flexure: 140_000,
   ceilingSoft: 4600,
@@ -146,6 +181,18 @@ const FACETS: readonly (readonly [number, number])[] = [
  * at a 9 km cell.
  */
 const LAKE_MIN_DEPTH = 4;
+
+/**
+ * Tie-breaking relief for the routing surface, metres, and its two
+ * frequencies (wavelengths of roughly 44 km and 22 km).
+ *
+ * Sized to dominate the filler's ε — a millimetre a cell, so a metre or so
+ * over a long chain — and to sit far below any real gradient. Never rendered;
+ * see the note in runLEM.
+ */
+const ROUTE_RELIEF = 12;
+const ROUTE_F0 = 900;
+const ROUTE_F1 = 1800;
 
 /** Per-cell surface area, from the local neighbour spacing. */
 export function cellAreas(grid: Grid): Float64Array {
@@ -685,6 +732,65 @@ function criticalSlopes(grid: Grid): Float64Array {
   return sc;
 }
 
+/**
+ * One super-time-stepping cycle, in units of the explicit stability limit.
+ *
+ * Chebyshev sub-steps, after Alexiades, Amiez & Gremaud (1996). The idea is
+ * that explicit Euler is stable only because it must damp the *stiffest*
+ * eigenmode every single step, and paying that on every step is what makes
+ * parabolic problems expensive. A cycle of s steps with unequal sizes only has
+ * to be stable in aggregate — the amplification factor of the whole cycle is a
+ * Chebyshev polynomial, which stays inside the unit disc while individual
+ * steps stray far outside it. A cycle covers about s² explicit steps.
+ *
+ * `nu` damps it. At nu = 0 the polynomial touches the stability boundary at
+ * every extremum, which is fine for a linear operator with fixed coefficients
+ * and not fine here: the critical-slope term recomputes the diffusivity from
+ * the slope at every sub-step, so the operator this is stabilising is not
+ * quite the one the polynomial was built for.
+ */
+function chebyshevTaus(s: number, nu: number): number[] {
+  const out: number[] = [];
+  for (let j = 1; j <= s; j++) {
+    out.push(1 / ((nu - 1) * Math.cos(((2 * j - 1) * Math.PI) / (2 * s)) + 1 + nu));
+  }
+  // Ascending, so a cycle works up to its large steps rather than opening with
+  // the largest one. The sequence is stable in either order for a linear
+  // operator; for this one, letting the small steps re-linearise the slopes
+  // first is measurably better behaved.
+  return out.sort((a, b) => a - b);
+}
+
+/**
+ * Sub-step sizes for one model step, in units of `dtMax`.
+ *
+ * Returns plain explicit sub-steps when that is already cheap or when
+ * super-time-stepping is switched off.
+ */
+export function diffuseSchedule(need: number, p: LemParams): number[] {
+  if (need <= 1) return [need];
+  if (p.stsMaxStages <= 1) {
+    const sub = Math.ceil(need);
+    return new Array(sub).fill(need / sub);
+  }
+  let taus = chebyshevTaus(p.stsMaxStages, p.stsDamping);
+  for (let s = 1; s <= p.stsMaxStages; s++) {
+    const t = chebyshevTaus(s, p.stsDamping);
+    if (t.reduce((a, b) => a + b, 0) >= need) {
+      taus = t;
+      break;
+    }
+  }
+  const total = taus.reduce((a, b) => a + b, 0);
+  const cycles = Math.max(1, Math.ceil(need / total));
+  // Scaled so the cycles sum to exactly the model step — the schedule has to
+  // integrate the same amount of time however it is chopped up.
+  const scale = need / (cycles * total);
+  const out: number[] = [];
+  for (let c = 0; c < cycles; c++) for (const t of taus) out.push(t * scale);
+  return out;
+}
+
 function diffuse(grid: Grid, z: Float32Array, tmp: Float32Array, p: LemParams, seaLevel: number): void {
   const { count } = grid;
   const scOf = criticalSlopes(grid);
@@ -693,12 +799,17 @@ function diffuse(grid: Grid, z: Float32Array, tmp: Float32Array, p: LemParams, s
   // Stability for the 4-point explicit Laplacian is 4·D·dt/d² ≤ 1/2. With the
   // critical-slope amplification capped at 1/(1−0.92) = 12.5, the worst-case
   // diffusivity is 12.5·D and the smallest cell sets d.
+  //
+  // This is the number that made the bake scale so badly with resolution:
+  // dtMax falls with d², so halving the cell size quarters the step *and*
+  // quadruples the cells, and the diffusion alone goes up sixteenfold. Super
+  // time stepping is what breaks that — see diffuseSchedule.
   const dMin = grid.minSpacing;
   const dtMax = (p.diffuseCourant * dMin * dMin) / (4 * p.D * 12.5);
-  const sub = Math.max(1, Math.ceil(p.dt / dtMax));
-  const dt = p.dt / sub;
+  const schedule = diffuseSchedule(p.dt / dtMax, p);
 
-  for (let s = 0; s < sub; s++) {
+  for (let s = 0; s < schedule.length; s++) {
+    const dt = schedule[s] * dtMax;
     tmp.set(z);
     for (let c = 0; c < count; c++) {
       if (tmp[c] <= seaLevel) continue;
@@ -936,12 +1047,45 @@ export function runLEM(
   const removed = new Float32Array(grid.count);
   const before = new Float32Array(grid.count);
 
-  let flow = routeFlow(grid, z, areas, seaLevel);
+  // Tie-breaking relief for every routing decision this model makes.
+  //
+  // Precomputed once and added to a scratch copy, never to the terrain. The
+  // point is which way the water goes, and on flat ground that is currently
+  // decided by the filler's ε — a millimetre a cell laid down in flood order,
+  // which radiates from spill points in straight lines along the eight
+  // neighbour directions. Routing on that for 140 steps does not merely draw
+  // rays, it *incises* them: the erosion follows the flow, so the rays end up
+  // in the elevation, baked, where nothing downstream can take them out.
+  //
+  // Doing it here rather than only at the end is the whole point. The first
+  // attempt applied this to the final route alone, by which time the incision
+  // had already happened.
+  const routeRelief = new Float32Array(grid.count);
+  for (let c = 0; c < grid.count; c++) {
+    const x = grid.dirs[c * 3];
+    const y = grid.dirs[c * 3 + 1];
+    const zz = grid.dirs[c * 3 + 2];
+    routeRelief[c] =
+      ROUTE_RELIEF * noise3(x * ROUTE_F0 + 5.1, y * ROUTE_F0 + 88.3, zz * ROUTE_F0 + 21.7) +
+      ROUTE_RELIEF * 0.5 *
+        noise3(x * ROUTE_F1 + 63.9, y * ROUTE_F1 + 12.4, zz * ROUTE_F1 + 47.2);
+  }
+  const zRoute = new Float32Array(grid.count);
+  /** Flow across the surface plus the tie-break, leaving `z` untouched. */
+  const routeWithRelief = (): Flow => {
+    for (let c = 0; c < grid.count; c++) zRoute[c] = z[c] + routeRelief[c];
+    fillDepressions(grid, zRoute, seaLevel);
+    return routeFlow(grid, zRoute, areas, seaLevel);
+  };
+
+  let flow = routeWithRelief();
 
   for (let s = 0; s < p.steps; s++) {
     if (s > 0 && s % p.rerouteEvery === 0) {
+      // The terrain still needs its own fill: incision has to run across a
+      // surface with no pits in it.
       fillDepressions(grid, z, seaLevel);
-      flow = routeFlow(grid, z, areas, seaLevel);
+      flow = routeWithRelief();
     }
     before.set(z);
     incise(z, flow, uplift, erodibility, p, seaLevel);
@@ -975,17 +1119,63 @@ export function runLEM(
   // So: keep the basin in the terrain, and hand the filled level out as the
   // water surface. The straight-line drainage still exists inside the basin and
   // is now underwater, where it belongs and cannot be seen.
+  // Two surfaces, and they are not the same surface.
+  //
+  // Routing needs a depression-free field, which is what the filler produces.
+  // *Rendering* wants the eroded terrain. Those were being conflated: `z` was
+  // set to the filled surface and then restored only where the fill was deeper
+  // than LAKE_MIN_DEPTH — 12.2% of land by the measurement in planet.ts. The
+  // other 87.8% kept the filler's output as its elevation.
+  //
+  // That is not a small cosmetic difference, because of what the filler writes.
+  // Priority-Flood+ε raises each depression to its spill point plus a
+  // millimetre per cell, laid down in flood order, and flood order on a grid
+  // radiates from the spill point in straight rays along the eight neighbour
+  // directions. On a slope that ε is buried under real gradient and nobody can
+  // see it. On a flat — a desert interior, a basin floor — the ε *is* the
+  // gradient, so the surface acquires a starburst of rays converging on every
+  // spill point, and the shading picks them out because shading is a function
+  // of exactly this field's derivative. It is the pattern that kept showing up
+  // from orbit, and no amount of work downstream could remove it, because it
+  // was in the elevation itself.
+  //
+  // So the filled surface is used for what it is for and then dropped. The
+  // terrain handed out is always the one the erosion produced.
   const zPreFill = Float32Array.from(z);
   const water = Float32Array.from(z);
   fillDepressions(grid, water, seaLevel);
-  z.set(water);
-  flow = routeFlow(grid, z, areas, seaLevel);
-  // Restore the basins to the surface now that routing is done. Only genuine
-  // standing water survives the threshold: the filler's own ε is a millimetre
-  // per cell and would otherwise mark half the planet as a lake.
+
+  // A third surface, for routing only, and the reason is the ε again.
+  //
+  // Taking the filler's output out of the *elevation* stopped the rays being
+  // shaded, but flow is still routed across that surface, so the drainage
+  // itself — and the wetness that colours the ground from it — kept radiating
+  // from every spill point in straight lines. The artefact moved from the
+  // relief into the moisture.
+  //
+  // On a flat the ε is the only gradient there is, so whatever it encodes is
+  // what the water follows, and flood order encodes the shape of a BFS. The
+  // fix is to give the flats a gradient that means something instead. This is
+  // the cheap end of the Garbrecht–Martz idea: rather than solving for a
+  // gradient away from high ground and toward the outlet, lay a smooth
+  // deterministic relief over the filled surface and re-fill, so the flats
+  // drain along *that* instead of along the flood front. The drainage that
+  // comes out is dendritic and has no preferred direction, which is the whole
+  // point; where there is real gradient this is far below it and changes
+  // nothing.
+  //
+  // It is free of visual risk because this surface is never drawn. `z` is the
+  // eroded terrain and `water` is the lake level; both are already decided.
+  // The only thing this field determines is which way the water goes.
+  for (let c = 0; c < grid.count; c++) zRoute[c] = water[c] + routeRelief[c];
+  fillDepressions(grid, zRoute, seaLevel);
+  flow = routeFlow(grid, zRoute, areas, seaLevel);
+  z.set(zPreFill);
+  // Only genuine standing water survives the threshold: the filler's own ε is
+  // a millimetre per cell and would otherwise mark half the planet as a lake.
+  // Everything shallower is a dry closed basin, which is what a playa is.
   for (let c = 0; c < grid.count; c++) {
-    if (water[c] - zPreFill[c] > LAKE_MIN_DEPTH) z[c] = zPreFill[c];
-    else water[c] = z[c];
+    if (water[c] - zPreFill[c] <= LAKE_MIN_DEPTH) water[c] = zPreFill[c];
   }
 
   return { z, area: flow.area, flow, water };

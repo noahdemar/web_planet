@@ -8,7 +8,7 @@
 
 import { ACESFilmicToneMapping, PerspectiveCamera, Scene, Vector3 } from 'three';
 import { WebGPURenderer } from 'three/webgpu';
-import { MAX_LEVEL, RADIUS } from './planet.js';
+import { MAX_LEVEL, RADIUS, VEG_MODEL_BANDS } from './planet.js';
 import { planetSurface, seedFromLocation } from './planetSource.js';
 import { AutoExposure } from './exposure.js';
 import { ALTITUDES, SITES } from './tour.js';
@@ -23,6 +23,7 @@ import { directionToFace } from './cubesphere.js';
 import { normalize } from './math/vec3d.js';
 import { auditCracks, probeDrawnHeight } from './devAudit.js';
 import { Vegetation } from './vegetation.js';
+import { loadTreeAssets } from './treeAssets.js';
 import { Sky } from './sky.js';
 import { Clouds } from './clouds.js';
 import { CASCADES, CASTER_DEPTH, Shadows } from './shadows.js';
@@ -268,7 +269,13 @@ async function main(): Promise<void> {
   const clouds = new Clouds();
   scene.add(clouds.mesh);
 
-  const vegetation = new Vegetation(shadowOf);
+  // Tree models, before the vegetation: the geometry and the baked impostor
+  // atlas are compiled into its node materials at construction, so they have
+  // to exist first. A few megabytes and one offscreen bake — small against the
+  // planet itself, which is already loaded by this point.
+  bootStage.textContent = 'growing the forest';
+  const treeAssets = await loadTreeAssets(renderer);
+  const vegetation = new Vegetation(treeAssets, shadowOf);
   for (const m of vegetation.meshes) scene.add(m);
 
   // Ground clutter. Its own pass rather than a fourth vegetation band — see
@@ -278,12 +285,14 @@ async function main(): Promise<void> {
 
   const shadowCasters = [
     { mesh: terrain.mesh, depthMaterial: terrain.depthMaterial },
-    // Only the near two bands cast. The far band is ~95% of all instances and
-    // its shadows land where aerial perspective has already taken over.
-    ...vegetation.meshes.slice(0, 2).map((m, i) => ({
+    // Only the geometry bands cast. The impostor bands are ~95% of all
+    // instances and their shadows land where aerial perspective has already
+    // taken over — and a shadow cast from a single view-dependent quad turns
+    // inside out as you walk around it, which is worse than no shadow at all.
+    ...vegetation.meshes.slice(0, VEG_MODEL_BANDS).map((m, i) => ({
       mesh: m,
       depthMaterial: vegetation.depthMaterials[i],
-      maxCascadeRadius: i === 0 ? 400 : 2000,
+      maxCascadeRadius: i < 2 ? 400 : 2000,
     })),
   ];
   let shadowsOn = QUALITY.shadows;
@@ -454,7 +463,9 @@ async function main(): Promise<void> {
       const p = controls.pos;
       const inv = 1 / Math.hypot(p[0], p[1], p[2]);
       const dotUp = (sun.x * p[0] + sun.y * p[1] + sun.z * p[2]) * inv;
-      exposure.update(dotUp, controls.groundRadius - RADIUS, controls.altitude, dt);
+      const camDir = camera.getWorldDirection(new Vector3());
+      const camDotUp = (camDir.x * p[0] + camDir.y * p[1] + camDir.z * p[2]) * inv;
+      exposure.update(dotUp, controls.groundRadius - RADIUS, controls.altitude, dt, camDotUp);
       renderer.toneMappingExposure = exposure.value;
     }
 
@@ -560,7 +571,7 @@ async function main(): Promise<void> {
           sky.mesh,
           clouds.mesh,
           grass.mesh,
-          ...vegetation.meshes.slice(2),
+          ...vegetation.meshes.slice(VEG_MODEL_BANDS),
         ]);
         renderer.setClearColor(0x000000, 1);
 
@@ -837,6 +848,8 @@ async function main(): Promise<void> {
       // after a teleport, which is what tour() effectively does a frame later.
       exposure,
       vegetation,
+      treeAssets,
+      grass,
       sky,
       clouds,
       shadows,

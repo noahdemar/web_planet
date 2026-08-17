@@ -14,5 +14,19 @@ export default defineConfig({
   // from the repo it is running in. Get this wrong and every asset 404s while
   // index.html loads fine, which reads as a blank page.
   base: process.env.BASE_PATH ?? '/',
+  resolve: {
+    alias: {
+      // GLTFLoader, like everything under three/examples, imports from 'three'
+      // — the WebGL-flavoured core entry — while the app imports
+      // 'three/webgpu'. Both resolve to real modules, so it works, and three
+      // then prints "Multiple instances of Three.js being imported" and the
+      // bundle carries two copies of the core. The WebGPU entry re-exports all
+      // of core, so pointing bare 'three' at it collapses them to one.
+      //
+      // Exact-match only ('three$'): 'three/tsl' and 'three/examples/...' must
+      // keep resolving to their own entry points.
+      three$: 'three/webgpu',
+    },
+  },
   build: { target: 'esnext' },
 });

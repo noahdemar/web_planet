@@ -52,6 +52,11 @@ import {
   BAND_FADE_HI,
   BAND_FADE_LO,
   EROSION_K,
+  FACET_K,
+  FACET_OCT_HI,
+  FACET_OCT_LO,
+  FACET_SLOPE_HI,
+  FACET_SLOPE_LO,
   BIOME_LACUNARITY,
   CHANNEL_DEPTH,
   DEFAULT_OCTAVES,
@@ -66,6 +71,7 @@ import {
   CLOUD_ZONAL,
   DRAW_RIVERS,
   COAST_WARP_FADE,
+  COAST_WARP_FLOOR,
   COAST_WARP_OCTAVES,
   CLUMP_MEDIAN,
   CLUMP_STRENGTH,
@@ -83,6 +89,9 @@ import {
   RELIEF_SLOPE_LO,
   LOCAL_PERIOD,
   MIN_NOISE_LAMBDA,
+  PIX_FADE_HI,
+  PIX_FADE_LO,
+  PIX_LAMBDA,
   WATER_ROUGH,
   WAVE_ANISO,
   WAVE_CAP,
@@ -93,10 +102,23 @@ import {
   WAVE_SLOPE,
   PATCH_BLEED,
   RADIUS,
+  BILLOW_MEAN,
+  FLAT_WET_CUT,
+  FLAT_WET_HI,
+  FLAT_WET_LO,
   RIDGE_MEAN,
+  SHAPE_SHARP_HI,
+  SHAPE_SHARP_LO,
   SHORE_FLAT_FLOOR,
   SHORE_FLAT_HI,
   VALLEY_WET_HI,
+  VALLEY_DEPTH,
+  VALLEY_DEPTH_GAIN,
+  VALLEY_F0,
+  VALLEY_LACUNARITY,
+  VALLEY_LEVELS,
+  VALLEY_MEAN,
+  VALLEY_WIDTH,
   VALLEY_WET_LO,
   VEG_MAX_SLOPE,
   VEG_MIN_ELEVATION,
@@ -302,8 +324,10 @@ export const coastWarp = wgslFn(/* wgsl */ `
 fn coastWarp(dir: vec3<f32>, radius: f32, bakeH: f32) -> vec3<f32> {
   // Local to the coast. See COAST_WARP_FADE: a global warp slides the whole
   // planet sideways under the camera.
-  let w = 1.0 - smoothstep(0.0, ${f(COAST_WARP_FADE)}, abs(bakeH));
-  if (w <= 0.0) { return vec3<f32>(0.0); }
+  // Full strength at the shoreline, COAST_WARP_FLOOR of it inland — the coast
+  // needs the warp for its shape, the interior needs it to hide the D8 grid.
+  let w = mix(${f(COAST_WARP_FLOOR)}, 1.0,
+              1.0 - smoothstep(0.0, ${f(COAST_WARP_FADE)}, abs(bakeH)));
   var axis = vec3<f32>(0.0, 1.0, 0.0);
   if (abs(dir.y) > 0.95) { axis = vec3<f32>(1.0, 0.0, 0.0); }
   let e0 = normalize(cross(axis, dir));
@@ -765,6 +789,19 @@ fn waveField_${s}(pLocal: vec3<f32>, up: vec3<f32>, wind: vec3<f32>,
  */
 export function ampBlock(sfx: string): string {
   return /* wgsl */ `
+/**
+ * Wetness with the flat-ground drainage fan withdrawn — see FLAT_WET_CUT.
+ *
+ * Applied here rather than at the call site because *every* consumer of a
+ * surface height has to agree: the terrain mesh, the vegetation scatter and
+ * the grass all evaluate height_ from their own copies of the bake, and a
+ * withdrawal applied to one of them puts the trees above the ground.
+ */
+fn flatWet_${sfx}(wet: f32, slope: f32) -> f32 {
+  let sloped = smoothstep(${f(FLAT_WET_LO)}, ${f(FLAT_WET_HI)}, slope);
+  return wet - ${f(FLAT_WET_CUT)} * (1.0 - sloped);
+}
+
 fn ampAt_${sfx}(bakeH: f32, slope: f32, wet: f32) -> f32 {
 
   let relief = smoothstep(${f(RELIEF_SLOPE_LO)}, ${f(RELIEF_SLOPE_HI)}, slope);
@@ -800,6 +837,93 @@ fn ampAt_${sfx}(bakeH: f32, slope: f32, wet: f32) -> f32 {
  * silently failed to build, taking every blade and every tree with it.
  * A block that needs another one should carry it (LESSONS §8).
  */
+/**
+ * Sub-grid valley network — the drainage the bake cannot resolve.
+ *
+ * See the VALLEY_* block in planet.ts for why this exists at all: the bake
+ * tops out at 0.010 km/km² of drainage density against Earth's 0.5–5, no
+ * affordable bake resolution closes that, and ridged fBm never will, because
+ * what fBm lacks is not spectrum but *connectivity*. Terrain reads as real
+ * when its valleys join up.
+ *
+ * The whole thing turns on one observation: the zero set of a smooth noise
+ * field is a connected, branching network of curves, and the distance to that
+ * set is available in closed form to first order as |n| / |∇n|. So a valley
+ * network costs exactly one noise evaluation per level — the same as an
+ * octave of fBm — and unlike a distance transform it is differentiable, which
+ * this field has no choice about: the surface normal, the slope the biomes
+ * read and the ground the trees stand on all come from the gradient this
+ * returns.
+ *
+ * Three things it deliberately inherits rather than reinventing:
+ *
+ *   amp        depth is a fraction of the amplification amplitude, so the
+ *              network collapses on floodplains, fades at the shoreline and
+ *              scales with resolved relief exactly as the octaves do. A plain
+ *              stays a plain; a range gets a gorge.
+ *   band limit the same fade window as the octaves, but measured across the
+ *              *trench* rather than the noise wavelength. A trench is a
+ *              fourteenth of its own wavelength, so fading it on the
+ *              wavelength would draw a 370 m channel on a mesh sampling every
+ *              2 km — undersampled by an order of magnitude, which is how the
+ *              surface came to boil the last time something skipped this.
+ *   bias       carving only ever removes rock, so the term has a 20% mean and
+ *              a level fading in would drop the ground. Near sea level that
+ *              moves the coastline (I2). Measured by tools/valleyMean.ts.
+ */
+/*
+ * PARKED, not deleted. Wired in and then taken back out: the network it draws
+ * is a set of *closed loops*, because that is what the zero set of a smooth
+ * field is, and real drainage is a directed tree. At the density this reaches
+ * it read as a maze laid over the ground rather than as terrain, and at ground
+ * level — where all four levels are in band and actually displace the surface —
+ * it was worse than the smooth field it replaced.
+ *
+ * What it needs before it goes back in is direction: weighting each level's
+ * carve by how well the valley axis (perpendicular to the noise gradient)
+ * aligns with the local downslope, which removes the contour-parallel segments
+ * that close the loops and leaves the downhill-running ones that converge.
+ * Left here with its measured bias constant and its band-limit derivation
+ * intact, because all of that was validated and none of it was the problem.
+ */
+export function valleyBlock(s: string): string {
+  return /* wgsl */ `
+fn valleys_${s}(dir: vec3<f32>, amp: f32, bandLimit: f32) -> vec4<f32> {
+  var cut = 0.0;
+  var grad = vec3<f32>(0.0);
+  var depth = ${f(VALLEY_DEPTH)};
+  var frq = ${f(VALLEY_F0)};
+  for (var i = 0; i < ${VALLEY_LEVELS}; i = i + 1) {
+    // Samples across the full trench, not across the wavelength.
+    let w = smoothstep(${f(BAND_FADE_LO)}, ${f(BAND_FADE_HI)},
+                       ${f(2 * VALLEY_WIDTH)} * bandLimit / frq);
+    if (w > 0.002) {
+      let n = noised_${s}(dir * frq + vec3<f32>(f32(i) * 13.31 + 101.7));
+      // Gradient with respect to direction: the argument is dir * frq.
+      let gd = n.yzw * frq;
+      let gl = max(length(gd), 1e-6);
+      // First-order distance to the zero set, in units of direction, and the
+      // half width in the same units — VALLEY_WIDTH is in lattice cells and a
+      // lattice cell is 1/frq of direction.
+      let dist = abs(n.x) / gl;
+      let halfW = ${f(VALLEY_WIDTH)} / frq;
+      let t = dist / halfW;
+      let p = exp(-t * t);
+      let a = w * depth * amp;
+      cut = cut + a * (p - ${f(VALLEY_MEAN)});
+      // d(dist)/d(dir) = sign(n) * gd / gl, holding |∇n| constant — it varies
+      // over a lattice cell while n varies over the trench, so the error is
+      // second order in the one place the gradient is large.
+      grad = grad + a * p * (-2.0 * t / halfW) * sign(n.x) * gd / gl;
+    }
+    depth = depth * ${f(VALLEY_DEPTH_GAIN)};
+    frq = frq * ${f(VALLEY_LACUNARITY)};
+  }
+  return vec4<f32>(cut, grad);
+}
+`;
+}
+
 export function field(s: string): string {
   return /* wgsl */ `
 ${ampBlock(s)}
@@ -854,7 +978,15 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
   // dh/ds where s is arc length: the gradient is per unit direction, and a
   // unit of direction is one planet radius of surface.
   let slope = length(bakeG) / radius;
-  let amp = ampAt_${s}(bakeH, slope, wet);
+  // One withdrawal, before anything reads it, so the carve and the amplitude
+  // cannot disagree about where a river is.
+  let wetE = flatWet_${s}(wet, slope);
+  let amp = ampAt_${s}(bakeH, slope, wetE);
+  // How much of a facet this ground is — see the landform block in planet.ts.
+  // Varies over the bake's cell, three orders of magnitude coarser than the
+  // octaves it damps, so it is treated as constant by the gradient below for
+  // exactly the reason d(amp)/d(dir) is dropped further down.
+  let facet = ${f(FACET_K)} * smoothstep(${f(FACET_SLOPE_LO)}, ${f(FACET_SLOPE_HI)}, slope);
 
   var mAmp = 1.0; var mFrq = ${f(AMP_F0)}; var mSum = 0.0;
   var mG = vec3<f32>(0.0); var mSq = 0.0; var mBias = 0.0;
@@ -873,23 +1005,33 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
   for (var i = 0; i < oct; i = i + 1) {
     // Full weight while the wavelength spans BAND_FADE_HI samples, zero by
     // BAND_FADE_LO. The window is fitted, not chosen — see planet.ts.
-    let w = smoothstep(${f(BAND_FADE_LO)}, ${f(BAND_FADE_HI)}, bandLimit / mFrq);
+    // Band limit, then the facet: a steep face keeps its shape and loses its
+    // texture. Folded into w so the bias and the gradient scale with it and
+    // the ladder stays zero-mean at every band limit (I2).
+    let wF = 1.0 - facet * smoothstep(${f(FACET_OCT_LO)}, ${f(FACET_OCT_HI)}, f32(i));
+    let w = smoothstep(${f(BAND_FADE_LO)}, ${f(BAND_FADE_HI)}, bandLimit / mFrq) * wF;
     if (w > 0.002) {
       let n = noised_${s}(dir * mFrq + vec3<f32>(f32(i) * 7.77));
       let sg = select(-1.0, 1.0, n.x >= 0.0);
       let r = 1.0 - abs(n.x);
+      // Rounded masses at the top of the ladder, sharp crests at the bottom.
+      // Both are functions of |n|, so dShape is the whole of the difference
+      // as far as the gradient is concerned — see SHAPE_SHARP_LO.
+      let sharp = smoothstep(${f(SHAPE_SHARP_LO)}, ${f(SHAPE_SHARP_HI)}, f32(i));
+      let shape = mix(2.0 * abs(n.x) - 1.0, r * r, sharp);
+      let dShape = mix(2.0, -2.0 * r, sharp);
       // Erosion: damp this octave by the slope the coarser ones already built.
       // Evaluated from the accumulator *before* this octave contributes, so the
       // first rung is never damped by itself.
       let ero = 1.0 / (1.0 + ${f(EROSION_K)} * dot(mE, mE));
-      mSum  = mSum + w * mAmp * r * r * ero;
-      mG    = mG - w * mAmp * 2.0 * r * sg * mFrq * n.yzw * ero;
-      mE    = mE - w * mAmp * 2.0 * r * sg * n.yzw;
+      mSum  = mSum + w * mAmp * shape * ero;
+      mG    = mG + w * mAmp * dShape * sg * mFrq * n.yzw * ero;
+      mE    = mE + w * mAmp * dShape * sg * n.yzw;
       // r² has a positive mean, so the octaves that are switched on would
       // otherwise raise the ground by an amount that changes with distance —
       // moving the coastline as you fly toward it. Track the bias of exactly
       // the octaves in play and remove it.
-      mBias = mBias + w * mAmp * ${f(RIDGE_MEAN)} * ero;
+      mBias = mBias + w * mAmp * mix(${f(BILLOW_MEAN)}, ${f(RIDGE_MEAN)}, sharp) * ero;
     }
     // Unweighted: the normalisers must not change with the band limit.
     mSq = mSq + mAmp * mAmp;
@@ -930,7 +1072,7 @@ fn height_${s}(dir: vec3<f32>, oct: i32, hscale: f32,
   // the only part of the surface that is not band-limited to the mesh, and it
   // does not need to be: it is a smooth function of a smooth field, so it
   // refines continuously instead of arriving as new octaves do.
-  let ch = channel_${s}(wet, distAxis);
+  let ch = channel_${s}(wetE, distAxis);
   let h0 = (bakeH - ch.x + detail * amp) * hscale;
   // The amplitude field varies over the bake's cell size, three orders of
   // magnitude coarser than the detail it scales, so d(amp)/d(dir) is
@@ -1158,7 +1300,33 @@ fn forestClump_${s}(dir: vec3<f32>, bandLimit: f32) -> f32 {
   for (var i = 0; i < 6; i = i + 1) {
     let w = smoothstep(1.0, 2.5, bandLimit / frq);
     if (w > 0.002) {
-      sum = sum + w * amp * noised_${s}(dir * frq + vec3<f32>(f32(i) * 11.37)).x;
+      var dRot = dir;
+      if (i == 0) {
+        dRot = vec3<f32>(dot(dir, vec3<f32>( 0.80,  0.36, -0.48)),
+                         dot(dir, vec3<f32>(-0.36,  0.93,  0.10)),
+                         dot(dir, vec3<f32>( 0.48,  0.08,  0.87)));
+      } else if (i == 1) {
+        dRot = vec3<f32>(dot(dir, vec3<f32>( 0.62, -0.61,  0.49)),
+                         dot(dir, vec3<f32>( 0.71,  0.70, -0.02)),
+                         dot(dir, vec3<f32>(-0.33,  0.36,  0.87)));
+      } else if (i == 2) {
+        dRot = vec3<f32>(dot(dir, vec3<f32>( 0.29,  0.87, -0.40)),
+                         dot(dir, vec3<f32>(-0.85,  0.44,  0.29)),
+                         dot(dir, vec3<f32>( 0.44,  0.22,  0.87)));
+      } else if (i == 3) {
+        dRot = vec3<f32>(dot(dir, vec3<f32>(-0.51,  0.44,  0.74)),
+                         dot(dir, vec3<f32>( 0.66,  0.75, -0.01)),
+                         dot(dir, vec3<f32>(-0.55,  0.49, -0.67)));
+      } else if (i == 4) {
+        dRot = vec3<f32>(dot(dir, vec3<f32>( 0.53,  0.72, -0.45)),
+                         dot(dir, vec3<f32>(-0.76,  0.64,  0.12)),
+                         dot(dir, vec3<f32>( 0.37,  0.28,  0.88)));
+      } else {
+        dRot = vec3<f32>(dot(dir, vec3<f32>(-0.42,  0.81,  0.41)),
+                         dot(dir, vec3<f32>(-0.83, -0.19, -0.52)),
+                         dot(dir, vec3<f32>(-0.36, -0.56,  0.75)));
+      }
+      sum = sum + w * amp * noised_${s}(dRot * frq + vec3<f32>(f32(i) * 11.37)).x;
     }
     norm = norm + amp;
     amp = amp * 0.55;
@@ -1536,8 +1704,16 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // an arbitrary phase makes the surface boil (LESSONS §4). Nothing moves here,
   // the sampling is one per pixel by construction, and four is still twice
   // Nyquist — that extra octave is most of what this buys.
+  // Slope as a true gradient (rise over run), to match the units the facet
+  // window is fitted in. Taken from the interpolated surface normal rather
+  // than the baked gradient, which is not carried this far: at the scales this
+  // damps, the two agree closely, and where they do not it is because the
+  // surface is rough — which is the case this is trying to quiet anyway.
+  let cUp = clamp(dot(n, up), 1e-4, 1.0);
+  let bakeSlopeF = sqrt(max(1.0 - cUp * cUp, 0.0)) / cUp;
+
   let mPerPx = max(length(fwidth(rel)), 0.02);
-  let pixLam = max(mPerPx * 4.0, ${f(MIN_NOISE_LAMBDA)});
+  let pixLam = max(mPerPx * ${f(PIX_LAMBDA)}, ${f(MIN_NOISE_LAMBDA)});
   let meshBand = cfg3.y / max(lvl.y, 0.01);
   let pixBand = cfg3.y / pixLam;
 
@@ -1553,13 +1729,21 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   var dOct = lvl.w; var rOct = ${f(REFERENCE_SPECTRUM[1])};
   for (var i = 0; i < ${DEFAULT_OCTAVES}; i = i + 1) {
     let wMesh = smoothstep(${f(BAND_FADE_LO)}, ${f(BAND_FADE_HI)}, meshBand / dFrq);
-    let wPix = smoothstep(${f(BAND_FADE_LO)}, ${f(BAND_FADE_HI)}, pixBand / dFrq);
-    let w = clamp(wPix - wMesh, 0.0, 1.0);
+    let wPix = smoothstep(${f(PIX_FADE_LO)}, ${f(PIX_FADE_HI)}, pixBand / dFrq);
+    // Same facet damping height_ applies, or the shaded half of the ladder
+    // would keep drawing the texture the displaced half has dropped.
+    let wFacet = 1.0 - ${f(FACET_K)}
+               * smoothstep(${f(FACET_SLOPE_LO)}, ${f(FACET_SLOPE_HI)}, bakeSlopeF)
+               * smoothstep(${f(FACET_OCT_LO)}, ${f(FACET_OCT_HI)}, f32(i));
+    let w = clamp(wPix - wMesh, 0.0, 1.0) * wFacet;
     if (w > 0.004) {
       let nz = noised_T(up * dFrq + vec3<f32>(f32(i) * 7.77));
       let sg = select(-1.0, 1.0, nz.x >= 0.0);
       let rr = 1.0 - abs(nz.x);
-      dG = dG - w * dAmp * 2.0 * rr * sg * dFrq * nz.yzw;
+      // Same shape schedule as height_, or the two halves of the ladder would
+      // be continuing different fields.
+      let sharpF = smoothstep(${f(SHAPE_SHARP_LO)}, ${f(SHAPE_SHARP_HI)}, f32(i));
+      dG = dG + w * dAmp * mix(2.0, -2.0 * rr, sharpF) * sg * dFrq * nz.yzw;
     }
     dSq = dSq + dAmp * dAmp;
     rSum = rSum + rAmp;
@@ -1651,6 +1835,25 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
     }
   }
 
+  let rotB = vec3<f32>(dot(up, vec3<f32>( 0.80,  0.36, -0.48)),
+                      dot(up, vec3<f32>(-0.36,  0.93,  0.10)),
+                      dot(up, vec3<f32>( 0.48,  0.08,  0.87)));
+  let rotC = vec3<f32>(dot(up, vec3<f32>( 0.62, -0.61,  0.49)),
+                      dot(up, vec3<f32>( 0.71,  0.70, -0.02)),
+                      dot(up, vec3<f32>(-0.33,  0.36,  0.87)));
+  let rotD = vec3<f32>(dot(up, vec3<f32>( 0.29,  0.87, -0.40)),
+                      dot(up, vec3<f32>(-0.85,  0.44,  0.29)),
+                      dot(up, vec3<f32>( 0.44,  0.22,  0.87)));
+  let rotE = vec3<f32>(dot(up, vec3<f32>(-0.51,  0.44,  0.74)),
+                      dot(up, vec3<f32>( 0.66,  0.75, -0.01)),
+                      dot(up, vec3<f32>(-0.55,  0.49, -0.67)));
+  let rotF = vec3<f32>(dot(up, vec3<f32>( 0.53,  0.72, -0.45)),
+                      dot(up, vec3<f32>(-0.76,  0.64,  0.12)),
+                      dot(up, vec3<f32>( 0.37,  0.28,  0.88)));
+  let rotG = vec3<f32>(dot(up, vec3<f32>(-0.42,  0.81,  0.41)),
+                      dot(up, vec3<f32>(-0.83, -0.19, -0.52)),
+                      dot(up, vec3<f32>(-0.36, -0.56,  0.75)));
+
   // Cover, per pixel. clim.z is the interpolated clump — the expensive part,
   // three noise octaves, still evaluated per vertex; the growth gates are a
   // handful of smoothsteps and are better applied here, against this pixel's
@@ -1697,8 +1900,8 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   //
   // Fixed frequencies, no band limit: the meander is a property of the river,
   // not of the camera, and it must not move as you approach.
-  let mw = noised_T(up * 320.0 + vec3<f32>(11.7)).x * 0.64
-         + noised_T(up * 1150.0 + vec3<f32>(53.1)).x * 0.36;
+  let mw = noised_T(rotB * 320.0 + vec3<f32>(11.7)).x * 0.64
+         + noised_T(rotC * 1150.0 + vec3<f32>(53.1)).x * 0.36;
   let dAxis = max(skyView.y + mw * ripHalf * 1.6, 0.0);
 
   let corridor = (1.0 - smoothstep(0.30, 1.0, dAxis / ripW))
@@ -1917,29 +2120,37 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
                      dot(up, vec3<f32>( 0.66,  0.75, -0.01)),
                      dot(up, vec3<f32>(-0.55,  0.49, -0.67)));
 
-  let f0 = 1.0 - smoothstep(2500.0, 7500.0, mPerPx);
-  let f1 = 1.0 - smoothstep(25.0, 75.0, mPerPx);
-  let fA = 1.0 - smoothstep(70.0, 210.0, mPerPx);
-  let fB = 1.0 - smoothstep(215.0, 645.0, mPerPx);
-  let fC = 1.0 - smoothstep(800.0, 2400.0, mPerPx);
+  let f1 = 1.0 - smoothstep(25.0, 100.0, mPerPx);
+  let fA = 1.0 - smoothstep(70.0, 350.0, mPerPx);
+  let fB = 1.0 - smoothstep(215.0, 1100.0, mPerPx);
+  let fC = 1.0 - smoothstep(800.0, 4200.0, mPerPx);
+  let f0 = 1.0 - smoothstep(2500.0, 14000.0, mPerPx);
+  let fF = 1.0 - smoothstep(8000.0, 45000.0, mPerPx);
+  let fG = 1.0 - smoothstep(24000.0, 140000.0, mPerPx);
 
   var mAcc = 0.0;
+  if (fG > 0.004) {
+    mAcc = mAcc + noised_T(rotG * (${f(RADIUS)} / 48000.0) + vec3<f32>(81.3)).x * 0.64 * fG;
+  }
+  if (fF > 0.004) {
+    mAcc = mAcc + noised_T(rotF * (${f(RADIUS)} / 16000.0) + vec3<f32>(37.1)).x * 0.58 * fF;
+  }
   if (f0 > 0.004) {
-    mAcc = mAcc + noised_T(dD * (${f(RADIUS)} / 5000.0) + vec3<f32>(11.7)).x * 0.52 * f0;
-  }
-  if (f1 > 0.004) {
-    mAcc = mAcc + noised_T(dE * (${f(RADIUS)} / 50.0) + vec3<f32>(53.4)).x * 0.26 * f1;
-  }
-  if (fA > 0.004) {
-    mAcc = mAcc + noised_T(up * (${f(RADIUS)} / 140.0) + vec3<f32>(71.3)).x * 0.34 * fA;
-  }
-  if (fB > 0.004) {
-    mAcc = mAcc + noised_T(dB * (${f(RADIUS)} / 430.0) + vec3<f32>(17.9)).x * 0.40 * fB;
+    mAcc = mAcc + noised_T(rotD * (${f(RADIUS)} / 5000.0) + vec3<f32>(11.7)).x * 0.52 * f0;
   }
   if (fC > 0.004) {
-    mAcc = mAcc + noised_T(dC * (${f(RADIUS)} / 1600.0) + vec3<f32>(43.1)).x * 0.46 * fC;
+    mAcc = mAcc + noised_T(rotC * (${f(RADIUS)} / 1600.0) + vec3<f32>(43.1)).x * 0.46 * fC;
   }
-  let mesoN = max(0.52 * f0 + 0.26 * f1 + 0.34 * fA + 0.40 * fB + 0.46 * fC, 1e-3);
+  if (fB > 0.004) {
+    mAcc = mAcc + noised_T(rotB * (${f(RADIUS)} / 430.0) + vec3<f32>(17.9)).x * 0.40 * fB;
+  }
+  if (fA > 0.004) {
+    mAcc = mAcc + noised_T(rotE * (${f(RADIUS)} / 140.0) + vec3<f32>(71.3)).x * 0.34 * fA;
+  }
+  if (f1 > 0.004) {
+    mAcc = mAcc + noised_T(rotE * (${f(RADIUS)} / 50.0) + vec3<f32>(53.4)).x * 0.26 * f1;
+  }
+  let mesoN = max(0.64 * fG + 0.58 * fF + 0.52 * f0 + 0.46 * fC + 0.40 * fB + 0.34 * fA + 0.26 * f1, 1e-3);
   let mesoRaw = mAcc / mesoN;
 
   // Tied to the landform, not merely laid over it.
@@ -2148,28 +2359,23 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   for (var i = 0; i < 6; i = i + 1) {
     let w = 1.0 - smoothstep(bmLam * 0.125, bmLam * 0.34, mPerPx);
     if (w > 0.003) {
+      var uRot = up;
+      if (i == 0) { uRot = rotB; }
+      else if (i == 1) { uRot = rotC; }
+      else if (i == 2) { uRot = rotD; }
+      else if (i == 3) { uRot = rotE; }
+      else if (i == 4) { uRot = rotF; }
+      else if (i == 5) { uRot = rotG; }
       bmSum = bmSum + w * bmAmp
-            * noised_T(up * (${f(RADIUS)} / bmLam) + vec3<f32>(f32(i) * 9.17 + 3.7)).x;
+            * noised_T(uRot * (${f(RADIUS)} / bmLam) + vec3<f32>(f32(i) * 9.17 + 3.7)).x;
     }
     bmNorm = bmNorm + bmAmp;
     bmAmp = bmAmp * 0.62;
     bmLam = bmLam * 0.34;
   }
   let moistB = clamp(moistA + (bmSum / bmNorm) * 0.105, 0.0, 1.0);
-  //
-  // Each window overlaps its neighbour so no boundary is a line. The forest
-  // windows deliberately match canopyClosure_'s moisture gate: where it is wet
-  // enough for trees the ground between them is leaf litter and meadow, not
-  // bare steppe, and any mismatch there becomes a two-tone mottle at exactly
-  // the scale you see from 20–100 km.
-  // ── seasonality, the third climate axis ───────────────────────────────
-  //
-  // How pronounced the dry season is. Rainforest, tropical dry forest and
-  // savanna can share an annual temperature and a similar annual rainfall;
-  // what separates them is whether the rain arrives all year or in one season,
-  // and for Mediterranean scrub that distribution *is* the biome. See
-  // biome.ts. One noise octave breaks the belts out of perfect zonal stripes.
-  let swing = noised_T(up * ${f(SEASON_F0)} + vec3<f32>(61.7)).x;
+
+  let swing = noised_T(rotC * ${f(SEASON_F0)} + vec3<f32>(61.7)).x;
   let season = season_T(abs(up.y), swing);
 
   // Ten biomes plus permanent ice, as a weighted blend rather than a choice —
@@ -2235,8 +2441,8 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // Two fixed wavelengths at the scale snow patches actually are, ~700 m and
   // ~2.4 km, plus the aspect: a pole-facing slope keeps its snow hundreds of
   // metres lower than the one opposite.
-  let snA = noised_T(up * (${f(RADIUS)} / 700.0) + vec3<f32>(43.9)).x;
-  let snB = noised_T(up * (${f(RADIUS)} / 2400.0) + vec3<f32>(88.1)).x;
+  let snA = noised_T(rotC * (${f(RADIUS)} / 700.0) + vec3<f32>(43.9)).x;
+  let snB = noised_T(rotD * (${f(RADIUS)} / 2400.0) + vec3<f32>(88.1)).x;
   let snowT = temp
             + (snA * 0.45 + snB * 0.55) * 0.020
             + aspect * 0.014
@@ -2281,7 +2487,11 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // origin (M5); a global function of a unit direction cannot reach it.
   var fgLam = max(mPerPx * 8.0, ${f(MIN_NOISE_LAMBDA)});
   for (var i = 0; i < 3; i = i + 1) {
-    fg = fg + fgAmp * noised_T(up * (${f(RADIUS)} / fgLam) + vec3<f32>(f32(i) * 4.13 + 51.0)).x;
+    var fgRot = up;
+    if (i == 0) { fgRot = rotB; }
+    else if (i == 1) { fgRot = rotC; }
+    else { fgRot = rotD; }
+    fg = fg + fgAmp * noised_T(fgRot * (${f(RADIUS)} / fgLam) + vec3<f32>(f32(i) * 4.13 + 51.0)).x;
     fgNorm = fgNorm + fgAmp;
     fgAmp = fgAmp * 0.55;
     fgLam = fgLam * 3.1;
@@ -2335,7 +2545,8 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   alb = mix(alb, mix(alb, temperate, 0.55), clamp(meso, 0.0, 1.0) * 0.30
                                             * smoothstep(0.20, 0.46, mesoWet));
   alb = alb * (1.0 + meso * 0.10);
-  alb = mix(alb, scree, clast * smoothstep(0.10, 0.34, slopeB)
+  let screeFade = 1.0 - smoothstep(1500.0, 12000.0, mPerPx);
+  alb = mix(alb, scree, clast * smoothstep(0.24, 0.52, slopeB) * screeFade
                         * (1.0 - smoothstep(0.30, 0.60, moist)) * 0.40);
 
   // Canopy. Same cover field the scatter uses, so ground colour and where

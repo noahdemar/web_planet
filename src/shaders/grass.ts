@@ -38,6 +38,7 @@ import {
   GRASS_H_HI,
   GRASS_H_LO,
   GRASS_MAX_SLOPE,
+  GRASS_FULL,
   GRASS_RANGE,
   GRASS_SLOPE_FULL,
   GRASS_SPACING,
@@ -129,9 +130,13 @@ fn grassSample(cell: vec2<f32>, bake: vec4<f32>, bake2: vec4<f32>,
   // fades out instead of ending, and no orbit ever exposes the boundary. The
   // hash is on the *global* cell index, so a blade's fate is a property of the
   // ground and does not change as you walk toward it (I1).
-  let full = ${f(GRASS_RANGE)} * 0.45;
+  let full = ${f(GRASS_FULL)};
   let density = 1.0 - smoothstep(full * full, ${f(GRASS_RANGE * GRASS_RANGE)}, d2);
-  if (r.z * 0.5 + 0.5 > density * density * 0.35 + 0.65 * step(d2, full * full)) {
+  // The tail is thinner than it was, because it is now four times longer. The
+  // product of the two is what costs, and past the full-density radius a blade
+  // is a couple of pixels — the eye reads the tail as ground colour with a
+  // texture on it, not as countable blades.
+  if (r.z * 0.5 + 0.5 > density * density * 0.18 + 0.82 * step(d2, full * full)) {
     return vec4<f32>(0.0, 0.0, 0.0, -1.0);
   }
 

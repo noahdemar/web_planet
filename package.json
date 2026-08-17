@@ -16,6 +16,7 @@
     "bake": "tsx tools/bake.ts",
     "bake:sweep": "tsx tools/bakeSweep.ts",
     "ridgemean": "tsx tools/ridgeMean.ts",
+    "valleymean": "tsx tools/valleyMean.ts",
     "slopes": "tsx tools/slopes.ts",
     "mirror": "tsx tools/mirror.ts",
     "biomes": "tsx tools/biomes.ts",

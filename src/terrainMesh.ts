@@ -40,6 +40,9 @@ import {
   PATCH_VERTS,
   RADIUS,
   FACE_EDGE,
+  FLAT_WET_CUT,
+  FLAT_WET_HI,
+  FLAT_WET_LO,
   FOREST_DENSITY,
   LOCAL_PERIOD,
   SEA_BAND,
@@ -350,6 +353,17 @@ export class TerrainMesh {
     // the channel lands in the right place and stays joined up.
     const distAxis = centre.a;
 
+    // Wetness with the flat-ground fan taken out, for the *climate* only —
+    // see FLAT_WET_CUT. Everything that decides a surface height reads the raw
+    // value and does its own withdrawal inside height_, because vegetation and
+    // grass evaluate that function from their own tile data and never come
+    // through here. Attenuating on this side alone made the ground the trees
+    // stand on a different surface from the ground the terrain draws, and they
+    // floated (I3).
+    const bakeSlope = n(tslDot(bakeGrad as never, bakeGrad as never)).sqrt().div(n(this.cfg).r);
+    const sloped = nStep(FLAT_WET_LO, FLAT_WET_HI, bakeSlope);
+    const wet = n(centre.g).sub(n(float(FLAT_WET_CUT)).mul(n(float(1)).sub(sloped)));
+
     // ── large-scale ambient occlusion ───────────────────────────────────
     //
     // The trace of the Hessian of the baked elevation, from the four taps the
@@ -378,7 +392,7 @@ export class TerrainMesh {
     // fragment stage lapses the temperature and applies the growth gates
     // against its own elevation and slope, so cover is per pixel; only the
     // three-octave clump has to be a varying.
-    const clim = asVec3(nCall(patchClimate, { dirSp: dirSp, wet: centre.g, radius: n(this.cfg).r }));
+    const clim = asVec3(nCall(patchClimate, { dirSp: dirSp, wet, radius: n(this.cfg).r }));
 
     // The spectrum of the ground here — (fBm gain, crossover octave) from the
     // biome table. Its own evaluation because both halves of the octave ladder

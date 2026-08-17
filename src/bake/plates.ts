@@ -36,6 +36,28 @@ export interface TectonicsParams {
   plates: number;
   /** Fraction of plates carrying continental crust. */
   continentalFraction: number;
+  /**
+   * Continental blocks, and the fraction of them that is land.
+   *
+   * Crust type is a property of the *crust*, not of the plate carrying it, and
+   * conflating the two is the single least Earth-like thing about this stage.
+   * With `continental` assigned per plate the plate edge is exactly the
+   * coastline everywhere, so every coast is a plate boundary and therefore
+   * every coast is orogenic. Earth is mostly the other way round: the Atlantic
+   * margins sit deep inside the American, African and Eurasian plates and have
+   * no mountains at all, because rifting left them there and the boundary
+   * moved away. Only the Pacific rim is an active margin.
+   *
+   * So continental blocks get their own seeds and their own warp, uncorrelated
+   * with the plates. What falls out is what Earth has: passive margins where a
+   * coast lies in a plate interior, Andean arcs where a convergent boundary
+   * happens to cross the continent–ocean line, and collisional belts where it
+   * runs continent to continent. All three profiles were already written (see
+   * CONVERGENT_CC / _OC / _OO below); until now the geometry could only ever
+   * present one of them.
+   */
+  cratons: number;
+  cratonFraction: number;
   /** Typical plate speed, m/yr. Earth: 0.01–0.10. */
   plateSpeed: number;
 }
@@ -44,6 +66,12 @@ export const DEFAULT_TECTONICS: TectonicsParams = {
   seed: 20260808,
   plates: 26,
   continentalFraction: 0.445,
+  cratons: 19,
+  // 0.44 is what the shipped asset in public/planet was baked at. A res-256
+  // sweep puts 0.52 at 27.7% land against Earth's 29.2% — closer, and the
+  // right value — but changing it here without re-baking would leave the
+  // source describing a planet nobody is loading. Change both together.
+  cratonFraction: 0.44,
   plateSpeed: 0.09,
 };
 
@@ -159,6 +187,8 @@ export function buildTectonics(grid: Grid, p = DEFAULT_TECTONICS): Tectonics {
   // rigid plate on a sphere can have, so this is not a simplification.
   const poles: V3[] = [];
   const rates: number[] = [];
+  // Retained only to seed the craton land flags with plate-scale variety; the
+  // crust a cell actually has comes from the craton field below.
   const continentalPlate: boolean[] = [];
   for (let i = 0; i < p.plates; i++) {
     const a = rand01(p.seed + 7000 + i * 5) * Math.PI * 2;
@@ -218,11 +248,33 @@ export function buildTectonics(grid: Grid, p = DEFAULT_TECTONICS): Tectonics {
     }
     return sum;
   };
+  // Continental blocks: their own seeds, their own land flags, their own warp.
+  const cratonSeeds = plateSeeds(p.cratons, p.seed + 811_000);
+  const cratonIsLand: boolean[] = [];
+  for (let i = 0; i < p.cratons; i++) {
+    cratonIsLand.push(rand01(p.seed + 811_500 + i * 7) < p.cratonFraction);
+  }
+  // Same construction as the plate warp, different offsets, so the two
+  // boundaries are uncorrelated. A shared warp would put the coastline back on
+  // the plate edge by a different route.
+  const cratonWarp = (o0: number, o1: number, o2: number): number => {
+    let a = WARP_AMP;
+    let fq = 2.1;
+    let sum = 0;
+    for (let i = 0; i < WARP_OCT; i++) {
+      sum += a * noise3(dir[0] * fq + o0, dir[1] * fq + o1, dir[2] * fq + o2);
+      a *= WARP_GAIN;
+      fq *= WARP_LAC;
+    }
+    return sum;
+  };
+
   for (let c = 0; c < count; c++) {
     dir[0] = grid.dirs[c * 3];
     dir[1] = grid.dirs[c * 3 + 1];
     dir[2] = grid.dirs[c * 3 + 2];
     const s = p.seed * 0.0001;
+    const cs = p.seed * 0.0001 + 5.5;
     // Distinct offsets per axis, or all three components warp together and the
     // displacement collapses onto one direction instead of being a vector.
     const w = normalize([
@@ -241,7 +293,24 @@ export function buildTectonics(grid: Grid, p = DEFAULT_TECTONICS): Tectonics {
       }
     }
     plate[c] = best;
-    continental[c] = continentalPlate[best] ? 1 : 0;
+
+    // Crust type from its own Voronoi, warped by its own field. Independent of
+    // the plate above, which is the whole point — see `cratons`.
+    const wc = normalize([
+      dir[0] + cratonWarp(cs, 0, 0),
+      dir[1] + cratonWarp(12.7, 0, cs),
+      dir[2] + cratonWarp(0, 88.9, 0),
+    ]);
+    let bestC = 0;
+    let bestCDot = -2;
+    for (let i = 0; i < p.cratons; i++) {
+      const d = wc[0] * cratonSeeds[i][0] + wc[1] * cratonSeeds[i][1] + wc[2] * cratonSeeds[i][2];
+      if (d > bestCDot) {
+        bestCDot = d;
+        bestC = i;
+      }
+    }
+    continental[c] = cratonIsLand[bestC] ? 1 : 0;
   }
 
   // --- boundary classification -------------------------------------------
@@ -287,8 +356,14 @@ export function buildTectonics(grid: Grid, p = DEFAULT_TECTONICS): Tectonics {
 
     const closing = dot(va, nrm) * 6_371_000; // back to m/yr
     const speed = Math.hypot(va[0], va[1], va[2]) * 6_371_000;
-    const cc = continentalPlate[pc];
-    const co = continentalPlate[plate[found]];
+    // Crust type at the two cells that actually meet, not the flag on the
+    // plates carrying them. Now that a plate can hold both kinds, the plate's
+    // own label says nothing about what is colliding here — reading it would
+    // raise an Andean arc in mid-ocean and a mid-ocean ridge through a
+    // continent, because the boundary would be classified from crust that may
+    // be five thousand kilometres away.
+    const cc = continental[c] === 1;
+    const co = continental[found] === 1;
 
     let cls: number;
     if (closing > 0.15 * speed) {

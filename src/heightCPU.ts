@@ -31,6 +31,7 @@ import {
   COAST_WARP_AMP,
   COAST_WARP_F0,
   COAST_WARP_FADE,
+  COAST_WARP_FLOOR,
   COAST_WARP_OCTAVES,
   DRAW_RIVERS,
   EROSION_K,
@@ -51,6 +52,17 @@ import {
   SHORE_FLAT_HI,
   VALLEY_WET_HI,
   VALLEY_WET_LO,
+  BILLOW_MEAN,
+  SHAPE_SHARP_HI,
+  SHAPE_SHARP_LO,
+  FLAT_WET_CUT,
+  FLAT_WET_HI,
+  FLAT_WET_LO,
+  FACET_K,
+  FACET_OCT_HI,
+  FACET_OCT_LO,
+  FACET_SLOPE_HI,
+  FACET_SLOPE_LO,
 } from './planet.js';
 import { shaderNoise, shaderNoiseD } from './shaderNoiseCPU.js';
 import { REFERENCE_SPECTRUM, climateAt, spectrumAt, tempAtCPU } from './biome.js';
@@ -175,7 +187,10 @@ export function setPlanetSurface(s: PlanetSurface): void {
  * this is written to match the shader line for line rather than idiomatically.
  */
 export function warpForCoast(dir: V3, bakeH: number): V3 {
-  const wgt = 1 - sstep(0, COAST_WARP_FADE, Math.abs(bakeH));
+  // Mirrors the mix() in coastWarp — see COAST_WARP_FLOOR.
+  const wgt =
+    COAST_WARP_FLOOR +
+    (1 - COAST_WARP_FLOOR) * (1 - sstep(0, COAST_WARP_FADE, Math.abs(bakeH)));
   if (wgt <= 0) return dir;
   const ax: V3 = Math.abs(dir[1]) > 0.95 ? [1, 0, 0] : [0, 1, 0];
   const e0 = normalize([
@@ -263,9 +278,18 @@ export function heightAt(
   // carveChannels: it is measured, not reconstructed.
   const distAxis = channelDist;
 
+  // Mirrors flatWet_ in the shader. Withdrawn once, before anything reads it:
+  // this function is what the camera stands on and what the offline tools
+  // measure, so a disagreement here is the ground moving under your feet.
+  const wetE =
+    wetness - FLAT_WET_CUT * (1 - sstep(FLAT_WET_LO, FLAT_WET_HI, slope));
+
+  // Mirrors the facet term in height_ — see the landform block in planet.ts.
+  const facet = FACET_K * sstep(FACET_SLOPE_LO, FACET_SLOPE_HI, slope);
+
   const relief = sstep(RELIEF_SLOPE_LO, RELIEF_SLOPE_HI, slope);
   const landW = sstep(-350, 40, bakeH);
-  const valley = sstep(VALLEY_WET_LO, VALLEY_WET_HI, wetness);
+  const valley = sstep(VALLEY_WET_LO, VALLEY_WET_HI, wetE);
   // Matches the shore term in the shader: the coastline is pinned to the bake
   // so it cannot move with the camera.
   const shore = SHORE_FLAT_FLOOR + (1 - SHORE_FLAT_FLOOR) * sstep(0, SHORE_FLAT_HI, Math.abs(bakeH));
@@ -313,7 +337,8 @@ export function heightAt(
   let mOct = sCross;
   let rOct = REFERENCE_SPECTRUM[1];
   for (let i = 0; i < octaves; i++) {
-    const w = sstep(BAND_FADE_LO, BAND_FADE_HI, bandLimit / mFrq);
+    const wF = 1 - facet * sstep(FACET_OCT_LO, FACET_OCT_HI, i);
+    const w = sstep(BAND_FADE_LO, BAND_FADE_HI, bandLimit / mFrq) * wF;
     if (w > 0.002) {
       const o = i * 7.77;
       // Rounded to f32 *before* the hash, because the shader has no choice but
@@ -339,15 +364,21 @@ export function heightAt(
       const n = nd[0];
       const sg = n >= 0 ? 1 : -1;
       const r = 1 - Math.abs(n);
+      // Same shape schedule as height_: billow at the top of the ladder,
+      // ridged at the bottom. Both functions of |n|, so the gradient factor is
+      // the whole of the difference.
+      const sharp = sstep(SHAPE_SHARP_LO, SHAPE_SHARP_HI, i);
+      const shape = (2 * Math.abs(n) - 1) + (r * r - (2 * Math.abs(n) - 1)) * sharp;
+      const dShape = 2 + (-2 * r - 2) * sharp;
       // Same erosion term as the shader, from the accumulator before this
       // octave contributes to it.
       const ero = 1 / (1 + EROSION_K * (mEx * mEx + mEy * mEy + mEz * mEz));
-      mSum += w * mAmp * r * r * ero;
-      mBias += w * mAmp * RIDGE_MEAN * ero;
-      const ek = w * mAmp * 2 * r * sg;
-      mEx -= ek * nd[1];
-      mEy -= ek * nd[2];
-      mEz -= ek * nd[3];
+      mSum += w * mAmp * shape * ero;
+      mBias += w * mAmp * (BILLOW_MEAN + (RIDGE_MEAN - BILLOW_MEAN) * sharp) * ero;
+      const ek = w * mAmp * dShape * sg;
+      mEx += ek * nd[1];
+      mEy += ek * nd[2];
+      mEz += ek * nd[3];
     }
     mSq += mAmp * mAmp;
     rSum += rAmp;
@@ -364,14 +395,14 @@ export function heightAt(
   const mNorm = (Math.sqrt(mSq) * rSum) / Math.sqrt(rSq);
 
   // The reconstructed channel, cut into the valley floor. Mirrors channel_().
-  const chOn = sstep(VALLEY_WET_LO, VALLEY_WET_HI, wetness);
+  const chOn = sstep(VALLEY_WET_LO, VALLEY_WET_HI, wetE);
   const halfW = Math.min(
     COAST_WARP_AMP,
   COAST_WARP_F0,
   COAST_WARP_FADE,
   COAST_WARP_OCTAVES,
   CHANNEL_HALF_HI,
-    Math.max(CHANNEL_HALF_LO, CHANNEL_WIDTH_K * Math.sqrt(10 ** wetness)),
+    Math.max(CHANNEL_HALF_LO, CHANNEL_WIDTH_K * Math.sqrt(10 ** wetE)),
   );
   const chM = chOn > 0 ? 1 - sstep(0, halfW * 2.5, distAxis) : 0;
   // Scaled by DRAW_RIVERS exactly as channel_ is — this function is what the

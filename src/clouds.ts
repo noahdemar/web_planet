@@ -93,8 +93,8 @@ fn cloudShade(dirIn: vec3<f32>, camPos: vec3<f32>, sunDir: vec3<f32>,
   // the path length through it. The previous version used the coverage itself,
   // which gave every cloud the same flat opacity right up to a hard edge, and
   // that is most of why the deck read as a decal.
-  let thick = cu * cu;
-  let alpha = clamp(thick + ci * 0.30 * (1.0 - cu), 0.0, 1.0);
+  let thick = pow(cu, 1.4) * 0.88;
+  let alpha = clamp(thick * 0.92 + ci * 0.28 * (1.0 - cu), 0.0, 1.0);
   if (alpha < 0.004) { discard; }
 
   // ── shading ─────────────────────────────────────────────────────────────

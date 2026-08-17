@@ -74,7 +74,7 @@ export const OCEAN_DEPTH = -5400; // basin floor where the land mask is zero
  * that most of the *visible* globe-scale gain came free from MIN_SELECT_LEVEL
  * rather than from here.
  */
-export const BAKE_RES = 512;
+export const BAKE_RES = 1024;
 
 /** Deepest quadtree level. L19 ≈ 6.9 cm ground sample distance at 256²/tile. */
 export const MAX_LEVEL = 19;
@@ -112,6 +112,32 @@ export const AMP_F0 = Math.round(1.47 * ((RADIUS * BAKE_RES) / (2 * FACE_EDGE)))
  * with distance cannot move the coastline.
  */
 export const RIDGE_MEAN = 0.7452;
+
+/**
+ * Mean of the billow term, 2|noise| − 1. Measured the same way RIDGE_MEAN is,
+ * and cross-checked by reproducing RIDGE_MEAN to five figures in the same run.
+ */
+export const BILLOW_MEAN = -0.7123;
+
+/**
+ * Where the ladder changes the *shape* of its octaves, in octave index.
+ *
+ * Every octave used to be ridged — (1 − |n|)² — which is why the terrain read
+ * as one crinkle repeated at every size rather than as a landscape. Real
+ * relief does not work that way: a massif at 30 km is a rounded mass, and it
+ * is only at the scale of spurs and gullies that ground develops sharp crests
+ * with flat ground between them. A ladder whose rungs are all the same shape
+ * can have exactly the right spectrum and still look like a texture, because
+ * shape is what tells you how big something is.
+ *
+ * So the coarse rungs are billow — rounded humps — and the fine ones ridged,
+ * crossing over across the first few octaves. Both are functions of |n| alone,
+ * so the analytic gradient stays exact: they differ only in a factor that the
+ * chain rule carries through unchanged, and each carries its own measured mean
+ * so the blend is still zero-mean at every band limit (I2).
+ */
+export const SHAPE_SHARP_LO = 0.5;
+export const SHAPE_SHARP_HI = 3.5;
 
 /**
  * Largest noise frequency f32 can carry.
@@ -239,8 +265,28 @@ export const DEFAULT_OCTAVES = maxOctavesFor(AMP_F0);
  * temperate broadleaf landscape gets — the country the ladder was fitted to.
  * See BIOMES in biome.ts, and `spectrumOctave` below.
  */
+/**
+ * Below this wavelength the ladder stops behaving like a fractal surface and
+ * starts behaving like a hillslope.
+ */
 export const HILLSLOPE_WAVELENGTH = 700;
-export const HILLSLOPE_GAIN = 1 / RELIEF_LACUNARITY;
+/**
+ * Gain past the hillslope crossover.
+ *
+ * It was 1/lacunarity, which is exactly the value that makes every finer
+ * octave contribute the *same* slope — H = 1.00. That was chosen to stop slope
+ * growing without bound as octaves are added, and it does. What it also does
+ * is guarantee that four or five sub-700 m octaves each add identical
+ * roughness, and they stack into a uniform orange-peel crinkle with no
+ * landform in it at all. Mountains came out as a field of same-sized bumps.
+ *
+ * Real ground is smoother than that below the drainage scale, and for a
+ * physical reason: soil creep is diffusive, so it erases short-wavelength
+ * relief faster than long. A hillslope is close to planar between its gullies.
+ * 0.42 puts H at 1.19 there — slope now *falls* with each finer octave instead
+ * of holding, so the finest rungs texture the surface rather than defining it.
+ */
+export const HILLSLOPE_GAIN = 0.42;
 
 /**
  * There used to be a HILLSLOPE_F here — the crossover as a frequency, for
@@ -295,12 +341,118 @@ export const HILLSLOPE_SOFT = 1.0;
  * gain RELIEF_GAIN and dividing by the unweighted normaliser leaves a signal
  * of roughly ±0.1.
  */
+/* ── Sub-grid valley network (SPEC.md §6) ────────────────────────────────
+ *
+ * The single largest gap between this planet and a satellite image, and it is
+ * a gap in *structure* rather than in spectrum.
+ *
+ * The bake solves drainage globally, which is the one thing a local function
+ * cannot do — but it can only resolve channels down to its own cell. At
+ * BAKE_RES 1024 that is a 9 km cell and a measured drainage density of
+ * 0.010 km/km², against Earth's 0.5–5. The bake's own diagnostic prints the
+ * verdict: "sub-grid density is the runtime's job".
+ *
+ * Raising BAKE_RES does not fix it. Density ceiling is 1/cell, so even an
+ * 8192 solve — 403 M cells — tops out at 0.89 km/km², the very bottom of
+ * Earth's range, and 16384 is not a bake anybody is going to run. The
+ * amplification has to invent the network, and the amplification it had could
+ * not: ridged fBm with an erosion term makes a surface that is *weathered*,
+ * with slopes that look eroded, but its valleys do not connect to anything.
+ * Real terrain is organised by drainage at every scale, and connectivity is
+ * the property that reads as real.
+ *
+ * The trick that makes this affordable is that the zero set of a smooth noise
+ * field is already a connected, branching curve network, and the distance to
+ * it is available in closed form to first order as |n| / |∇n|. So a valley
+ * network costs one noise evaluation per level — the same as an octave — and
+ * carries an analytic gradient, which this field must have.
+ *
+ * Four levels at these frequencies give a cumulative 2.45 km/km², inside
+ * Earth's range and 250x what the bake resolves.
+ */
+
+/** Levels of sub-grid network. Each doubles the density of the one above. */
+export const VALLEY_LEVELS = 4;
+/**
+ * Frequency of the coarsest level, cycles per unit direction.
+ *
+ * Twice AMP_F0, so the network starts just inside the band the bake has
+ * stopped resolving rather than competing with channels the bake already
+ * carved. At BAKE_RES 1024 that is a 6.1 km valley spacing, refining to
+ * 770 m at the fourth level.
+ */
+export const VALLEY_F0 = AMP_F0 * 2;
+export const VALLEY_LACUNARITY = 2;
+/**
+ * Trench half-width, in lattice cells of the level's own noise.
+ *
+ * Also the width the bias measurement is taken at — see tools/valleyMean.ts.
+ * Valley spacing is about one lattice cell, so this is a valley floor about
+ * an eighth of the distance to the next divide, which is what a mature
+ * fluvial landscape looks like from above.
+ */
+export const VALLEY_WIDTH = 0.06;
+/**
+ * Depth of the coarsest trench, as a fraction of the local amplification
+ * amplitude, and the falloff per level.
+ *
+ * A fraction of `ampAt_` rather than an absolute depth, so the network
+ * inherits everything that field already knows: it collapses on floodplains,
+ * fades at the shoreline, and scales with resolved relief. A plain stays a
+ * plain and a range gets a gorge.
+ */
+export const VALLEY_DEPTH = 0.30;
+export const VALLEY_DEPTH_GAIN = 0.62;
+/**
+ * Pixel window for the *shading* half of the network, in pixels across the
+ * trench. Full weight at VALLEY_PIX_HI, gone by VALLEY_PIX_LO.
+ *
+ * Deliberately far more permissive than BAND_FADE, and the difference is the
+ * difference between displacing a surface and shading one. BAND_FADE is fitted
+ * to a morphing CDLOD grid, where a vertex landing on an arbitrary phase makes
+ * the surface boil (LESSONS §4) — it has to be conservative. Nothing moves in
+ * the fragment stage, sampling is one per pixel by construction, and the only
+ * question is whether the trench is wide enough to draw. Below a pixel it must
+ * go, because a sub-pixel trench is aliasing and nothing else; at two and a
+ * half it is a line you can see.
+ *
+ * This is what puts the drainage on the ground at orbital altitude. At 70 km
+ * a pixel is 72 m and the four levels are 10, 5, 2.5 and 1.3 pixels across, so
+ * the whole network is renderable — while the mesh, at a vertex every kilometre
+ * or so, can displace none of it.
+ */
+export const VALLEY_PIX_LO = 0.8;
+export const VALLEY_PIX_HI = 2.5;
+
+/**
+ * Mean of the trench profile, per unit depth. Measured, not derived —
+ * `npm run valleymean`. Subtracted so a level fading in cannot lower the
+ * ground, which near sea level would move the coastline (I2).
+ */
+export const VALLEY_MEAN = 0.2006;
+
 export const AMP_BASE = 150;
 /**
  * Retuned with BAKE_RES: at 1024 the bake carries relief the amplification
  * used to have to invent, so leaving this at 6200 double-loaded it and put the
  * rugged median at 33° with 11% of the surface past 60° — back toward the
  * cliffs the hillslope crossover exists to prevent.
+ */
+/**
+ * Retuned again, and this time downward.
+ *
+ * Cutting this was the wrong lever and it is back where it was. The mountains
+ * were not too *tall*, they were too *rough* — the two are different problems
+ * and only one of them lives here. Amplitude scales every octave at once, so
+ * dropping it took the massifs down along with the crinkle and the result read
+ * as flattened, which is worse than noisy: a range with no height is not a
+ * range at all.
+ *
+ * Where the noise actually came from is the spectrum, not the amplitude — see
+ * HILLSLOPE_GAIN. Steepening the roll-off below the hillslope scale moves
+ * energy out of the finest rungs and leaves the coarse ones carrying the
+ * landform, which is the shape of the fix: same relief, distributed the way
+ * real ground distributes it.
  */
 export const AMP_RELIEF = 4000;
 
@@ -337,8 +489,8 @@ export const AMP_RELIEF = 4000;
  * alone put 22% of land at full amplitude instead of 13% and took the rugged
  * median from 15° to 28°. Scaled by the same 1.41 the distribution moved.
  */
-export const RELIEF_SLOPE_LO = 0.0015;
-export const RELIEF_SLOPE_HI = 0.0111;
+export const RELIEF_SLOPE_LO = 0.0017;
+export const RELIEF_SLOPE_HI = 0.0155;
 
 /**
  * ── Standing water ───────────────────────────────────────────────────────
@@ -511,6 +663,34 @@ export const CHANNEL_DEPTH = 22;
 export const CHANNEL_FILL = 0.72;
 
 /**
+ * Wetness withdrawn from low-gradient ground, in log₁₀ of drainage area, and
+ * the baked-slope window it fades across.
+ *
+ * The drainage the bake hands out is grid-shaped wherever the ground is flat,
+ * and it is worth being clear about why that is not fixable downstream. Flow
+ * on a plain has no gradient to follow, so the router is deciding between
+ * neighbours on differences of millimetres — the filler's ε, the last digits
+ * of the erosion — and whatever structure those have is what the water gets.
+ * On a slope the real gradient buries all of it. On a plain it *is* the
+ * signal, and it radiates from spill points in straight lines because that is
+ * the shape of a flood front on a lattice.
+ *
+ * So rather than keep trying to make the plain's drainage right, this stops
+ * drawing the part of it that cannot be. Subtracting from log-area on flat
+ * ground keeps the trunks — a river with 10¹¹ m² behind it survives losing
+ * 0.9 of a decade — and takes out the fan of minor tributaries that carries
+ * all of the artefact and none of the information. Which is also what a plain
+ * looks like: one defined channel, and drainage either side of it too diffuse
+ * to see.
+ *
+ * It fades on the *baked* slope, so it costs nothing and it moves with the
+ * terrain rather than with the camera.
+ */
+export const FLAT_WET_CUT = 1.9;
+export const FLAT_WET_LO = 0.0020;
+export const FLAT_WET_HI = 0.0140;
+
+/**
  * Depth at which a filled basin counts as a lake, metres, with a soft edge so
  * the shoreline ramps across the bilinear interpolant rather than stepping at
  * a texel.
@@ -558,6 +738,29 @@ export const LAKE_ON_HI = 52;
  * the fade drags *coarser* octaves into the transition, and their amplitude is
  * larger, so past [1, 4] the extra amplitude outweighs the gentler ramp.
  */
+/**
+ * Pixel-side fade for the fragment ladder, in units of `pixLam`.
+ *
+ * Separate from BAND_FADE because the two windows guard different things, and
+ * conflating them cost three octaves of sharpness everywhere.
+ *
+ * BAND_FADE guards a *displaced* octave on a morphing CDLOD grid, where a
+ * vertex landing on an arbitrary phase makes the surface boil (LESSONS §4).
+ * The fragment ladder displaces nothing, samples once per pixel by
+ * construction, and only has to stay above Nyquist.
+ *
+ * The old code reused BAND_FADE against a `pixLam` that already carried a 4x
+ * factor, so the safety margin was applied twice: an octave reached full
+ * weight only at *sixteen* pixels per wavelength, when the comment right above
+ * it claimed four. At 1793 km that put full weight at a 30 km wavelength and
+ * rendered the first amplification octave at 0.12 — which is why a desert from
+ * orbit was a smooth blank. Onset at 3 px and full at 6 px is still three times
+ * Nyquist and four times sharper.
+ */
+export const PIX_LAMBDA = 3.0;
+export const PIX_FADE_LO = 1.0;
+export const PIX_FADE_HI = 2.0;
+
 export const BAND_FADE_LO = 1.0;
 export const BAND_FADE_HI = 4.0;
 
@@ -636,6 +839,47 @@ export const SHORE_FLAT_FLOOR = 0.08;
  * obvious next move on it.
  */
 export const EROSION_K = 0.15;
+
+/* ── Landform-aware amplification ────────────────────────────────────────
+ *
+ * The amplification ladder used to run the same spectrum everywhere and let
+ * `ampAt_` scale it. That is why a mountain read as a field of same-sized
+ * bumps: switch the amplification off and the bake underneath has massifs,
+ * ridge systems and a trunk valley; switch it on and all of it disappears
+ * under uniform crinkle. Additive isotropic noise laid over a landform reads
+ * as noise, however carefully its amplitude is tuned — and tuning amplitude is
+ * the wrong lever anyway, because it takes the mountain down with the crinkle.
+ *
+ * What changes here is *character*, not amount: how rough the ground is at
+ * sub-kilometre scales now depends on where in the landform it sits, using
+ * fields the bake already exports and every caller of height_ already passes.
+ *
+ * The dominant term is the facet. Steep ground is bedrock, scree or cliff, and
+ * those are close to planar at a hundred metres — a mountain face is a *face*.
+ * Gentle ground is soil and is dissected by its own small drainage, so it is
+ * rough at exactly the scales the steep ground is smooth. The old ladder had
+ * this backwards: RELIEF_SLOPE ramps the amplitude *up* with slope, so the
+ * steepest ground got the most fine detail, which is where the crinkle was
+ * loudest and where it did the most damage to the landform.
+ */
+
+/**
+ * Baked slope over which ground becomes a facet. Fitted to the measured
+ * distribution — land median 0.0034, p90 0.0134, p99 0.056 — so this catches
+ * the steep tail and leaves ordinary hill country alone.
+ */
+export const FACET_SLOPE_LO = 0.008;
+export const FACET_SLOPE_HI = 0.045;
+/** Share of the fine-octave energy removed on a full facet. */
+export const FACET_K = 0.78;
+/**
+ * Octave indices over which "fine" ramps in. At AMP_F0 the ladder runs
+ * 12.25, 5.92, 2.86, 1.38, 0.67, 0.32, 0.16 km, so this damps from about
+ * 1.4 km down — which is the band the crinkle lives in and well below
+ * anything carrying a landform.
+ */
+export const FACET_OCT_LO = 2.5;
+export const FACET_OCT_HI = 6.0;
 
 export const WAVE_CELLS0 = 32;
 export const WAVE_OCTAVES = 5;
@@ -870,41 +1114,96 @@ export const VEG_RANGE = 6000;
  * triangles it has — decimation is the wrong tool for aggregate geometry
  * (SPEC.md §8, "Do we need Nanite?").
  *
- * The near band is real geometry, the mid band crossed quads, the far band a
- * single camera-facing quad. 130 m for the geometry band rather than 45: a 20 m
- * tree at 45 m still fills a sixth of the screen height, and a quad at that
- * size is the most obvious thing in the frame. The extra cost is bounded
- * because the band is an annulus of area, not a radius — and the near band is
- * where occlusion by nearer trees is heaviest.
+ * Instances are scanned models now (see treeAssets.ts), and that changes the
+ * shape of this table in one way that matters: a model band can only draw one
+ * species, because a band is one indirect draw and an indirect draw is one
+ * geometry. So the two geometry distances are each split in two, conifer and
+ * broadleaf, and the scatter bins on distance *and* species. The impostor
+ * bands are species-agnostic — the species picks a row of the atlas, not a
+ * draw.
+ *
+ * The geometry distances came down from 130 m, and that is the price of real
+ * models: a procedural tree was 512 triangles and the scanned near LOD is
+ * 2.2–4.8k. 45 m and 110 m keep the geometry bands at roughly the triangle
+ * budget the old 130 m band had. What buys the loss back is that the impostor
+ * now carries the model's own silhouette from eight baked yaws rather than a
+ * procedural blob, so the handover is far less visible than it was.
  */
+export const VEG_MODEL_NEAR = 45;
+export const VEG_MODEL_MID = 110;
+
+/**
+ * Distance thresholds, before the species split. The first
+ * VEG_MODEL_LODS entries are geometry; the rest are impostors.
+ */
+export const VEG_DIST_BANDS = [VEG_MODEL_NEAR, VEG_MODEL_MID, 1800, VEG_RANGE];
+/** How many of those distances draw real geometry. */
+export const VEG_MODEL_LODS = 2;
+/** Species the models cover: 0 conifer, 1 broadleaf. Also atlas rows. */
+export const VEG_SPECIES = 2;
+/**
+ * Bands drawing real geometry. The rest are impostors — and the split matters
+ * outside this file, because only the geometry bands cast shadows.
+ */
+export const VEG_MODEL_BANDS = VEG_MODEL_LODS * VEG_SPECIES;
+
 export const VEG_BANDS = [
-  { name: 'near', maxDist: 130 },
-  { name: 'mid', maxDist: 480 },
-  { name: 'far', maxDist: 1800 },
-  // A fourth band purely to reach 6 km. Same single quad as 'far'; it exists
-  // so the 1.8–6 km annulus — which is 89% of the scattered area — gets its
-  // own draw and its own capacity rather than crowding the band that has to
-  // hold up at 500 m.
-  { name: 'distant', maxDist: VEG_RANGE },
+  { name: 'near-conifer', maxDist: VEG_MODEL_NEAR, model: true, lod: 0, species: 0 },
+  { name: 'near-broadleaf', maxDist: VEG_MODEL_NEAR, model: true, lod: 0, species: 1 },
+  { name: 'mid-conifer', maxDist: VEG_MODEL_MID, model: true, lod: 1, species: 0 },
+  { name: 'mid-broadleaf', maxDist: VEG_MODEL_MID, model: true, lod: 1, species: 1 },
+  { name: 'far', maxDist: 1800, model: false, lod: -1, species: -1 },
+  // The last band exists purely to reach 6 km. Same impostor quad as 'far'; it
+  // gets its own draw and its own capacity so the 1.8–6 km annulus — 89% of the
+  // scattered area — does not crowd the band that has to hold up at 500 m.
+  { name: 'distant', maxDist: VEG_RANGE, model: false, lod: -1, species: -1 },
 ] as const;
 
 /**
- * Instances per band. Equal across bands on purpose: it makes the shader's
- * base offset plain arithmetic (`band * capacity`) instead of a branch chain.
+ * Instances per band — sized per band, not shared equally.
  *
- * Only the far band ever approaches this — it covers the 220–1100 m annulus,
- * which is 96% of the scattered area. At 400k per band the instance buffer is
- * 19 MB, which is nothing on a desktop, and the cap stops being what limits
- * the forest.
+ * Equal capacities used to be the point: the shader's base offset was
+ * `band * capacity`, plain arithmetic instead of a lookup. That stopped paying
+ * when the geometry distances were split by species. Four of the six bands now
+ * hold real models within 110 m, and a dense taiga at eye height puts about
+ * 170, 160, 940 and 710 instances in them — against a reservation of 400 000
+ * slots each. Nine-tenths of a 38 MB buffer was held for bands that never used
+ * a percent of it, while the two bands that carry the actual landscape sat
+ * pinned at their ceiling.
  *
- * It is not nothing on a phone: 19 MB of GPU storage and another 19 MB of JS
- * heap for the array backing it, held for the whole session. The lower tiers
- * scatter at a fraction of the density and so need a fraction of the slots —
- * see quality.ts, where the number is chosen against the density rather than
- * against the desktop's headroom.
+ * That ceiling was not a cosmetic problem. Past capacity the scatter keeps
+ * whichever instances happened to win the atomic, and thread order on a GPU is
+ * not defined — so the *set* of distant trees was reshuffling as the camera
+ * moved. Trees appeared to wander and blink at range, and no amount of hashing
+ * the placement could fix it, because the placement was never what varied.
+ *
+ * So: a small fixed allowance for the geometry bands, and the whole remaining
+ * budget split between the impostor bands, which is where the instances are.
+ * Same total memory as before.
  */
-export const VEG_BAND_CAPACITY = QUALITY.vegBandCapacity;
-export const VEG_CAPACITY = VEG_BAND_CAPACITY * VEG_BANDS.length;
+const VEG_GEOM_SLOTS = 16_384;
+const VEG_TOTAL_SLOTS = QUALITY.vegBandCapacity * VEG_BANDS.length;
+
+/** Slots per band, in band order. */
+export const VEG_BAND_SLOTS: readonly number[] = VEG_BANDS.map((b) =>
+  b.model
+    ? VEG_GEOM_SLOTS
+    : Math.floor(
+        (VEG_TOTAL_SLOTS - VEG_GEOM_SLOTS * VEG_MODEL_BANDS) /
+          (VEG_BANDS.length - VEG_MODEL_BANDS),
+      ),
+);
+
+/** Where each band's slice of the instance buffer starts. */
+export const VEG_BAND_BASE: readonly number[] = VEG_BAND_SLOTS.reduce<number[]>(
+  (acc, _slots, i) => {
+    acc.push(i === 0 ? 0 : acc[i - 1] + VEG_BAND_SLOTS[i - 1]);
+    return acc;
+  },
+  [],
+);
+
+export const VEG_CAPACITY = VEG_BAND_SLOTS.reduce((a, b) => a + b, 0);
 
 /** Growth limits, metres. */
 export const VEG_MIN_ELEVATION = 2;
@@ -1221,22 +1520,47 @@ export const VEG_MIN_PIXELS = 6.0;
 /**
  * Radius of the grass field, metres.
  *
- * Traded against density, and density is what was wrong. 65 536 blades over a
- * 34 m disc is 18 per m², which is not a sward — it is scattered tufts on bare
- * ground, and it read as sprinkles. The same budget over 22 m is 43 per m²,
- * which closes.
+ * Density was the thing to protect: 65 536 blades over a 34 m disc is 18 per
+ * m², which is not a sward but scattered tufts on bare ground, and it read as
+ * sprinkles. The answer then was to shrink the disc.
+ *
+ * The answer now is to grow the grid instead, because the two rejection tests
+ * in grassSample changed what a long range costs. Inside 45% of the range the
+ * field is still at full density; past that the hashed radial dissolve thins
+ * it to a third and takes it to nothing, so the added area is cheap and the
+ * boundary is never a visible circle. Doubling the grid buys twice the reach
+ * at the same density where density is actually looked at.
  */
-export const GRASS_RANGE = 42;
+export const GRASS_RANGE = 85;
+
+/**
+ * Radius held at full density, metres. Everything from here to GRASS_RANGE is
+ * the hashed dissolve thinning toward nothing.
+ *
+ * An absolute distance, deliberately, where it used to be `GRASS_RANGE * 0.45`
+ * inside the shader. Tying it to the range meant the dense disc grew with the
+ * square of any reach you asked for: taking the range from 42 m to 85 m
+ * quadrupled the full-density area and put the frame over 700 ms. The distance
+ * at which a viewer stops resolving one blade from the next is a property of
+ * blade size and screen resolution, not of how far the field happens to
+ * extend, so it belongs here as a number in metres.
+ */
+export const GRASS_FULL = 20;
 
 /**
  * Cells per side of the camera-centred blade grid, and their spacing.
  *
- * 256² at 0.28 m covers a 72 m square, comfortably past GRASS_RANGE in every
- * direction including the corners, and dispatches 65 536 threads — one
- * workgroup-friendly power of two, and small enough that the whole pass is
- * noise next to the 770 k candidates the tree scatter already runs.
+ * The grid is what actually bounds the range: it is camera-centred and finite,
+ * so no blade can exist outside it however large GRASS_RANGE is set. 1024² at
+ * 0.17 m covers a 174 m square, half-extent 87 m, which clears GRASS_RANGE on
+ * the axes where the square is thinnest.
+ *
+ * A megabyte of candidates is a big dispatch, and it is still the cheaper half
+ * of the pass: rejection happens in the first few instructions for the large
+ * majority of them, while everything that survives costs a full height-field
+ * evaluation and five segments of geometry.
  */
-export const GRASS_GRID = 512;
+export const GRASS_GRID = 1024;
 export const GRASS_SPACING = 0.17;
 
 /** Segments per blade. Four gives a curve; the tip is a triangle. */
@@ -1315,5 +1639,28 @@ export const COAST_WARP_OCTAVES = 5;
  * every scale, and only the shoreline is a hard threshold on the raw bake.
  */
 export const COAST_WARP_FADE = 450;
+/**
+ * Share of the warp that survives inland, where the coast fade has run out.
+ *
+ * The warp was gated to the shoreline on the grounds that inland terrain
+ * should sit where the bake put it. That is right about elevation and wrong
+ * about everything the *grid* leaks: the bake solves flow on a cube lattice
+ * with eight neighbours, so its channels can only leave a cell along eight
+ * directions. Inland, with no warp, that is exactly what gets drawn — straight
+ * runs meeting at right angles and a comb of parallel tributaries, which from
+ * 1000 km, where a 9 km cell is nine pixels, reads as a low-resolution
+ * drawing rather than as a river system.
+ *
+ * The same displacement that turns a chain of bilinear arcs into a coastline
+ * turns a D8 staircase into a meander, and it is the same three kilometres of
+ * lookup offset either way. It cannot slide under the camera — it is a fixed
+ * function of direction — and elevation, wetness and channel distance are all
+ * fetched through the one warped direction, so they stay mutually consistent:
+ * a river moves, and its valley and its floodplain move with it.
+ *
+ * Not the full amount, because inland the warp is buying disguise rather than
+ * shape, and the bake's elevation is worth staying close to.
+ */
+export const COAST_WARP_FLOOR = 0.55;
 /** Coarsest warp octave, cycles per radian. Three octaves down from here. */
 export const COAST_WARP_F0 = (RADIUS / (FACE_EDGE / BAKE_RES)) * 0.35;

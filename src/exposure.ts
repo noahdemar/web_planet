@@ -107,7 +107,7 @@ export class AutoExposure {
    * @param altitude   metres above the local surface
    * @param dt         seconds since the last frame
    */
-  update(sunDotUp: number, groundElev: number, altitude: number, dt: number): void {
+  update(sunDotUp: number, groundElev: number, altitude: number, dt: number, camDotUp = -0.5): void {
     const cosSun = Math.max(0, sunDotUp);
 
     // Which albedo to meter against depends on how much of the frame one
@@ -133,13 +133,21 @@ export class AutoExposure {
     const cosMeter = cosSun + (DISC_LIT_COS * phase - cosSun) * orbital;
 
     const direct = (SUN_IRRADIANCE * cosMeter * albedo) / Math.PI;
-    const sky = SUN_IRRADIANCE * 0.09 * albedo * (0.03 + 0.6 * cosMeter);
+    const skyGround = SUN_IRRADIANCE * 0.09 * albedo * (0.03 + 0.6 * cosMeter);
+    const groundLuminance = direct + skyGround;
+
+    // Sky contribution to the camera viewport (LESSONS §24).
+    // Include sky luminance when looking toward horizon or up, and eliminate it
+    // when looking straight down into dark forest/valleys so exposure opens up.
+    const skyLuminance = (SUN_IRRADIANCE * 0.12 * (0.03 + 0.97 * cosMeter)) / Math.PI;
+    const skyFrac = Math.max(0, Math.min(1, 0.45 + 0.5 * camDotUp)) * (1 - orbital);
+    const sceneKey = groundLuminance * (1 - skyFrac) + skyLuminance * skyFrac;
 
     // From orbit much of the frame is black space, but metering that in would
     // push the exposure up and blow out the disc. Discount it instead.
     const fill = 1 - 0.35 * orbital * orbital;
 
-    const key = Math.max(1e-4, (direct + sky) * fill);
+    const key = Math.max(1e-4, sceneKey * fill);
     const aloft = Math.min(1, altitude / ORBIT_CEILING_ALT);
     const ceiling = MAX_EXPOSURE + (MAX_EXPOSURE_ORBIT - MAX_EXPOSURE) * aloft;
     const target = Math.min(ceiling, Math.max(MIN_EXPOSURE, TARGET / key));
@@ -151,7 +159,7 @@ export class AutoExposure {
   }
 
   /** Jump straight to the metered value — for teleports, where a fade is wrong. */
-  snap(sunDotUp: number, groundElev: number, altitude: number): void {
-    this.update(sunDotUp, groundElev, altitude, 1e6);
+  snap(sunDotUp: number, groundElev: number, altitude: number, camDotUp = -0.5): void {
+    this.update(sunDotUp, groundElev, altitude, 1e6, camDotUp);
   }
 }

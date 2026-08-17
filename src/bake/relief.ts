@@ -73,6 +73,31 @@ export function addBaseRelief(
   let octaves = 1;
   while (p.baseFrequency * p.lacunarity ** octaves < nyquist) octaves++;
 
+  // Each octave is *rotated*, not merely offset.
+  //
+  // The same fault the albedo meso rungs had, and the same fix. noise3 is
+  // gradient noise on an integer lattice, so its features prefer the cell axes
+  // and the diagonals between them, and it is exactly zero at every lattice
+  // point. An offset slides that pattern around without turning it, so six
+  // octaves sampled from one direction vector all inherit one orientation and
+  // their artefacts land on top of each other. What comes out is a rectilinear
+  // weave at the scale of the finest octaves — 166 and 337 km here — and on a
+  // desert, where nothing else is carrying variation, it reads from orbit as a
+  // diamond lattice drawn across the continent.
+  //
+  // This is baked, so it cannot be fixed at runtime: it is in the elevation
+  // every consumer reads. Three dot products per octave, cycled through four
+  // arbitrary rotations — adjacent octaves are what stack visibly, and by the
+  // time an orientation repeats the two rungs are nine times apart in scale.
+  // They need not be exactly orthonormal; a percent of scale error on a noise
+  // lookup is not a quantity anything downstream can observe.
+  const ROT = [
+    [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    [0.8, 0.36, -0.48, -0.36, 0.93, 0.1, 0.48, 0.08, 0.87],
+    [0.62, -0.61, 0.49, 0.71, 0.7, -0.02, -0.33, 0.36, 0.87],
+    [0.51, 0.77, -0.38, -0.62, 0.64, 0.46, 0.6, -0.06, 0.8],
+  ];
+
   for (let c = 0; c < grid.count; c++) {
     const x = grid.dirs[c * 3];
     const y = grid.dirs[c * 3 + 1];
@@ -83,7 +108,11 @@ export function addBaseRelief(
     let sum = 0;
     let norm = 0;
     for (let o = 0; o < octaves; o++) {
-      sum += a * noise3(x * f + 13.7, y * f + 41.2, zz * f + 7.9);
+      const R = ROT[o % ROT.length];
+      const rx = x * R[0] + y * R[1] + zz * R[2];
+      const ry = x * R[3] + y * R[4] + zz * R[5];
+      const rz = x * R[6] + y * R[7] + zz * R[8];
+      sum += a * noise3(rx * f + 13.7, ry * f + 41.2, rz * f + 7.9);
       norm += a;
       a *= p.gain;
       f *= p.lacunarity;
