@@ -74,7 +74,7 @@ export const OCEAN_DEPTH = -5400; // basin floor where the land mask is zero
  * that most of the *visible* globe-scale gain came free from MIN_SELECT_LEVEL
  * rather than from here.
  */
-export const BAKE_RES = 1024;
+export const BAKE_RES = 512;
 
 /** Deepest quadtree level. L19 ≈ 6.9 cm ground sample distance at 256²/tile. */
 export const MAX_LEVEL = 19;
@@ -489,8 +489,8 @@ export const AMP_RELIEF = 4000;
  * alone put 22% of land at full amplitude instead of 13% and took the rugged
  * median from 15° to 28°. Scaled by the same 1.41 the distribution moved.
  */
-export const RELIEF_SLOPE_LO = 0.0017;
-export const RELIEF_SLOPE_HI = 0.0155;
+export const RELIEF_SLOPE_LO = 0.0015;
+export const RELIEF_SLOPE_HI = 0.0111;
 
 /**
  * ── Standing water ───────────────────────────────────────────────────────
@@ -871,7 +871,7 @@ export const EROSION_K = 0.15;
 export const FACET_SLOPE_LO = 0.008;
 export const FACET_SLOPE_HI = 0.045;
 /** Share of the fine-octave energy removed on a full facet. */
-export const FACET_K = 0.78;
+export const FACET_K = 0.0;
 /**
  * Octave indices over which "fine" ramps in. At AMP_F0 the ladder runs
  * 12.25, 5.92, 2.86, 1.38, 0.67, 0.32, 0.16 km, so this damps from about
@@ -1435,6 +1435,30 @@ export const CLOUD_ALT = 6500;
  * cumulonimbus needs an anvil and a real march to look like anything.
  */
 export const CLOUD_THICK = 2200;
+
+/**
+ * Samples through the cloud slab, and the octave discount each one takes.
+ *
+ * The deck was one alpha shell with a parallax trick standing in for depth.
+ * That gets the silhouette leaning the right way but it cannot give a cumulus
+ * an *interior*: opacity came from squaring the coverage, so a cloud was as
+ * opaque at its edge as a real one is in its middle, and the base shadow was a
+ * proxy on thickness rather than light actually failing to reach the bottom.
+ *
+ * Marching the slab fixes both, and it is affordable for one reason: the
+ * coverage field is a function of direction, and over a 2.2 km slab seen from
+ * 6.5 km the direction barely changes except at the limb. So the march does
+ * not need the full octave stack at every step — it passes an inflated pixel
+ * footprint, which is the same band limit the field already honours, and each
+ * sample costs two or three octaves instead of five.
+ *
+ * Ten steps is where the banding stops being visible against the dither the
+ * field already has. Past about sixteen there is nothing left to gain.
+ */
+export const CLOUD_MARCH = 10;
+export const CLOUD_MARCH_PX = 3.5;
+/** Extinction per unit coverage per metre of path. */
+export const CLOUD_SIGMA = 0.0016;
 
 /** Coarsest moisture octave. RADIUS/3.1 ≈ 2000 km — provinces, not weather. */
 export const BIOME_F0 = 3.1;
