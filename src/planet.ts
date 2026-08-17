@@ -1856,7 +1856,7 @@ export const VEG_MIN_PIXELS = 6.0;
  * boundary is never a visible circle. Doubling the grid buys twice the reach
  * at the same density where density is actually looked at.
  */
-export const GRASS_RANGE = 1050;
+export const GRASS_RANGE = 105;
 
 /**
  * Radius held at full density, metres. Everything from here to GRASS_RANGE is
@@ -1870,7 +1870,7 @@ export const GRASS_RANGE = 1050;
  * blade size and screen resolution, not of how far the field happens to
  * extend, so it belongs here as a number in metres.
  */
-export const GRASS_FULL = 240;
+export const GRASS_FULL = 24;
 
 /**
  * Cells per side of the camera-centred blade grid, and their spacing.
@@ -1885,8 +1885,8 @@ export const GRASS_FULL = 240;
  * majority of them, while everything that survives costs a full height-field
  * evaluation and five segments of geometry.
  */
-export const GRASS_GRID = 1024;
-export const GRASS_SPACING = 2.05;
+export const GRASS_GRID = 512;
+export const GRASS_SPACING = 0.42;
 
 /** Segments per blade. Four gives a curve; the tip is a triangle. */
 export const GRASS_SEGMENTS = 3;
