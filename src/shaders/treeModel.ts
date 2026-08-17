@@ -46,7 +46,7 @@ fn treeYaw_${s}(inst: vec4<f32>) -> f32 {
  * is still nearly all spruce, it is just a scanned spruce now.
  */
 fn treeSpecies_${s}(inst: vec4<f32>) -> f32 {
-  return 1.0 - step(0.45, instRnd_${s}(inst).y);
+  return 0.0;
 }
 /** (east, north, up) at the instance. Up is the planet normal, so trees stand. */
 fn modelFrame_${s}(inst: vec4<f32>, camPos: vec3<f32>) -> mat3x3<f32> {
@@ -415,7 +415,7 @@ ${noiseBlock('IM')}
  */
 export const instSpecies = wgslFn(/* wgsl */ `
 fn instSpecies(inst: vec4<f32>) -> f32 {
-  return 1.0 - step(0.45, instRnd_S(inst).y);
+  return 0.0;
 }
 ${instBlock('S')}
 ${noiseBlock('S')}
