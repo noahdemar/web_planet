@@ -717,6 +717,7 @@ async function main(): Promise<void> {
     grass.setSun(sun, sunColour);
     sky.setSun(sun, sunColour);
     clouds.setSun(sun, sunColour);
+    weather.setSun(sun, sunColour);
   }
 
   let sunEl = 38;
@@ -789,6 +790,7 @@ async function main(): Promise<void> {
     grass.setSun(sun, sunColour);
     sky.setSun(sun, sunColour);
     clouds.setSun(sun, sunColour);
+    weather.setSun(sun, sunColour);
     rockSun.position.copy(sun).multiplyScalar(10_000);
     rockSun.color.setRGB(sunColour.x, sunColour.y, sunColour.z);
   }

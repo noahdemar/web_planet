@@ -2,6 +2,7 @@ import {
   AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
+  Color,
   DynamicDrawUsage,
   LineBasicMaterial,
   LineSegments,
@@ -63,6 +64,13 @@ export class Weather {
   private nextStrike = 4;
   private strikeStart = -10;
   private strikeSeed = 1;
+  private readonly sun = new Vector3(0, 1, 0);
+  private readonly sunCol = new Vector3(1, 1, 1);
+
+  setSun(sun: Vector3, sunCol: Vector3): void {
+    this.sun.copy(sun).normalize();
+    this.sunCol.copy(sunCol);
+  }
 
   constructor() {
     this.rainPositions = new Float32Array(this.count * 2 * 3);
@@ -154,7 +162,15 @@ export class Weather {
       p[base + 5] = p[base + 2] - wind.z * len;
     }
     (this.rain.geometry.getAttribute('position') as BufferAttribute).needsUpdate = true;
-    this.rainMaterial.opacity = smoothstep(0.04, 0.75, this.intensity) * 0.48;
+
+    const sunUp = this.sun.dot(up);
+    const dayness = smoothstep(-0.15, 0.25, sunUp);
+    const flashMul = 1.0 + this.flash * 1.6;
+    const r = (0.435 + 0.232 * dayness) * flashMul;
+    const g = (0.561 + 0.219 * dayness) * flashMul;
+    const b = (0.659 + 0.193 * dayness) * flashMul;
+    this.rainMaterial.color.setRGB(r, g, b);
+    this.rainMaterial.opacity = smoothstep(0.04, 0.75, this.intensity) * (0.30 + 0.18 * dayness) * flashMul;
     this.rain.visible = this.rainMaterial.opacity > 0.005;
   }
 
