@@ -871,7 +871,7 @@ export const EROSION_K = 0.15;
 export const FACET_SLOPE_LO = 0.008;
 export const FACET_SLOPE_HI = 0.045;
 /** Share of the fine-octave energy removed on a full facet. */
-export const FACET_K = 0.0;
+export const FACET_K = 0.78;
 /**
  * Octave indices over which "fine" ramps in. At AMP_F0 the ladder runs
  * 12.25, 5.92, 2.86, 1.38, 0.67, 0.32, 0.16 km, so this damps from about
@@ -1448,17 +1448,61 @@ export const CLOUD_THICK = 2200;
  * Marching the slab fixes both, and it is affordable for one reason: the
  * coverage field is a function of direction, and over a 2.2 km slab seen from
  * 6.5 km the direction barely changes except at the limb. So the march does
- * not need the full octave stack at every step — it passes an inflated pixel
- * footprint, which is the same band limit the field already honours, and each
- * sample costs two or three octaves instead of five.
+ * not need the full octave stack at every step — it passes a slightly inflated
+ * pixel footprint, which is the same band limit the field already honours.
+ *
+ * It ended up at 1.0 — no inflation at all — and the reason is worth keeping.
+ * The march lights the cloud that the *shell* draws, so the two have to be
+ * looking at the same field. Give the march a coarser footprint and it keeps
+ * fewer octaves, so it sees the deck as the smooth round lumps the coarse
+ * octaves make on their own. The shading then says "nothing above this point"
+ * across a whole lump while the shell says "cloud here", and the disagreement
+ * is drawn: hard-edged bright discs stacked inside every cloud mass, which is
+ * not a subtle artefact and is not what any amount of tuning elsewhere would
+ * have fixed.
+ *
+ * So the inflation is kept as a knob and set to nothing. Any saving it buys
+ * comes straight out of the agreement between the light and the cloud.
  *
  * Ten steps is where the banding stops being visible against the dither the
  * field already has. Past about sixteen there is nothing left to gain.
  */
-export const CLOUD_MARCH = 10;
-export const CLOUD_MARCH_PX = 3.5;
+export const CLOUD_MARCH = 6;
+
+/* ── Aurora ──────────────────────────────────────────────────────────────
+ *
+ * Cheated, and the cheat is that it is drawn on a shell rather than as a
+ * volume. What it is not is a screen overlay: an aurora seen from orbit sits
+ * *above the limb* and wraps the pole as an oval, and a screen-space glow
+ * cannot do either. One sphere intersection puts it in the right place for
+ * nothing, and the same intersection is what makes it disappear correctly
+ * behind the planet when you are on the wrong side of it.
+ *
+ * The oval is a band of geomagnetic latitude, not a cap. Emission peaks around
+ * 67 degrees on Earth and falls away both poleward and equatorward, which is
+ * why the pole itself is usually dark — the single most recognisable thing
+ * about an auroral oval from space and free to reproduce here.
+ */
+
+/** Emission altitude, metres. The green line sits near 110 km. */
+export const AURORA_ALT = 115_000;
+/** Centre of the oval as sin(latitude), and its half-width in the same. */
+export const AURORA_BAND = 0.92;
+export const AURORA_WIDTH = 0.075;
+/** Overall strength. */
+export const AURORA_GAIN = 0.55;
+/**
+ * Sun elevation over which the aurora fades out.
+ *
+ * It is always there; it is only ever *visible* against a dark sky, and it has
+ * to be gone before the sky brightens or it reads as a coloured smear on a
+ * blue day. Measured at the emitting point, not at the camera, so the terminator
+ * cuts it the way it actually cuts it.
+ */
+export const AURORA_NIGHT = -0.09;
+export const CLOUD_MARCH_PX = 1.0;
 /** Extinction per unit coverage per metre of path. */
-export const CLOUD_SIGMA = 0.0016;
+export const CLOUD_SIGMA = 0.0;
 
 /** Coarsest moisture octave. RADIUS/3.1 ≈ 2000 km — provinces, not weather. */
 export const BIOME_F0 = 3.1;

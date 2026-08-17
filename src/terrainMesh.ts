@@ -229,6 +229,7 @@ export class TerrainMesh {
   private cfg2 = uniform(new Vector4(SEA_LEVEL, SEA_BAND, RADIUS, FACE_EDGE / PATCH_SEGS));
   /** cfg3 = (forestDensity, planetRadius, cloudCover, timeSeconds) */
   private cfg3 = uniform(new Vector4(FOREST_DENSITY, RADIUS, 0.5, 0));
+  private weather = uniform(new Vector4());
   private sun = uniform(new Vector3(0.55, 0.42, 0.72).normalize());
   /** Sun irradiance, not a screen colour — everything is multiplied by it. */
   private sunCol = uniform(new Vector3(1, 0.97, 0.92));
@@ -479,6 +480,7 @@ export class TerrainMesh {
         cfg3: this.cfg3,
         skyView: aoV,
         snap: this.camSnap,
+        weather: this.weather,
         shadow: shadowFactor ? shadowFactor(relPos) : float(1),
       }),
     );
@@ -554,6 +556,11 @@ export class TerrainMesh {
   setClouds(cover: number, timeSec: number): void {
     this.cfg3.value.z = cover;
     this.cfg3.value.w = timeSec;
+  }
+
+  setWeather(wetness: number, flash: number): void {
+    this.weather.value.x = wetness;
+    this.weather.value.y = flash;
   }
 
   setMode(m: ShadeMode): void {

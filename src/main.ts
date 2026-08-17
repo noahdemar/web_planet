@@ -30,6 +30,7 @@ import { CASCADES, CASTER_DEPTH, Shadows } from './shadows.js';
 import { ShadowInspector } from './shadowDebug.js';
 import { createShadowUniforms, makeShadowFactor } from './shaders/shadowSample.js';
 import { AdaptiveResolution, QUALITY } from './quality.js';
+import { Weather } from './weather.js';
 
 const GRID_STEPS = [0, 100, 10, 1, 0.1];
 
@@ -269,6 +270,9 @@ async function main(): Promise<void> {
   const clouds = new Clouds();
   scene.add(clouds.mesh);
 
+  const weather = new Weather();
+  scene.add(weather.rain, weather.lightning);
+
   // Tree models, before the vegetation: the geometry and the baked impostor
   // atlas are compiled into its node materials at construction, so they have
   // to exist first. A few megabytes and one offscreen bake — small against the
@@ -482,12 +486,22 @@ async function main(): Promise<void> {
 
     terrain.setCameraPosition(controls.pos[0], controls.pos[1], controls.pos[2]);
     terrain.setReferenceRadius(controls.groundRadius);
-    sky.update(controls.pos[0], controls.pos[1], controls.pos[2], camera.near);
+    sky.update(controls.pos[0], controls.pos[1], controls.pos[2], camera.near, now / 1000);
     clouds.update(controls.pos[0], controls.pos[1], controls.pos[2], now * 0.001);
     // The ground samples the same cloud field to shadow itself — see the cloud
     // shadow block in shadeTerrain. Same coverage, same clock, or the shadow
     // separates from the cloud casting it.
     terrain.setClouds(clouds.coverage, now * 0.001);
+    weather.update(
+      now * 0.001,
+      dt,
+      controls.pos as readonly [number, number, number],
+      controls.up,
+      controls.forward,
+      controls.altitude,
+      clouds.coverage,
+    );
+    terrain.setWeather(weather.wetness, weather.flash);
     // Pixels subtended by a one-metre object at one metre — drives the
     // sub-pixel vegetation fade, so it must track viewport and field of view.
     vegetation.setProjectionScale(
@@ -847,6 +861,7 @@ async function main(): Promise<void> {
       // it lets a caller apply `renderer.toneMappingExposure = sim.exposure.value`
       // after a teleport, which is what tour() effectively does a frame later.
       exposure,
+      weather,
       vegetation,
       treeAssets,
       grass,

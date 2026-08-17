@@ -64,67 +64,78 @@ fn cloudShade(dirIn: vec3<f32>, camPos: vec3<f32>, sunDir: vec3<f32>,
   var cu = f.x;
   let ci = f.y;
 
-  // ── the slab, marched ───────────────────────────────────────────────────
+  // ── parallax: give the shell a thickness it does not have ─────────────
   //
-  // This replaces the parallax trick that used to stand here. That trick
-  // offset one extra sample by the thickness over the cosine of the view
-  // angle, which leans the silhouette correctly and is genuinely most of what
-  // sells a deck from orbit — but it is still one sample of a 2D field, so a
-  // cloud had no interior. Opacity came from squaring the coverage, which
-  // makes the rim as opaque as the middle, and the dark base was a proxy on
-  // that same number rather than light failing to arrive.
+  // One alpha shell has no vertical extent, so the deck reads as a texture on
+  // glass however good the coverage field is. What tells the eye a cumulus is
+  // an object is that its top is *offset* from its base whenever you are not
+  // looking straight down it — and that offset is pure geometry, no volume
+  // required.
   //
-  // Marching gives both properly. The shell mesh puts this fragment on the
-  // base of the slab, so the ray only has to climb CLOUD_THICK in altitude
-  // from here: that is thickness over the vertical component of the view
-  // direction, which is the same geometry the lean used, walked instead of
-  // jumped. The floor on that cosine is the same 0.30 and for the same reason
-  // — at the limb the honest answer is that the cloud is edge-on.
+  // The tops sit CLOUD_THICK above the base, so seen along the view ray they
+  // are displaced tangentially by thickness / |cos of the view angle from
+  // vertical|. Sampling the same field there and taking the greater coverage
+  // extends the silhouette in the direction the tower leans away from the
+  // viewer, which is exactly what a real cumulus field does at the limb and at
+  // any oblique angle. Straight down it collapses to nothing, correctly.
   //
-  // Each step samples the coverage field with an inflated footprint so it
-  // spends two or three octaves rather than five. The field is band-limited by
-  // px already, so this is asking it for the scales the march can resolve
-  // rather than throwing detail away after paying for it.
+  // The 0.30 floor on the vertical term stops the offset running away at the
+  // horizon, where the geometry says infinity and the honest answer is that
+  // the cloud is edge-on and something else is in the way.
   let vd = normalize(dirIn * (Rg + ${CLOUD_ALT}.0) - camPos);
   let vUp = dot(vd, dir);
-  let span = ${CLOUD_THICK}.0 / max(abs(vUp), 0.30);
-  let dt = span / ${CLOUD_MARCH}.0;
-  // Climb, whichever side of the deck the camera is on. The shell mesh sits at
-  // the *base*, so from below the ray already runs up through the slab and
-  // from above it runs down out of it — marching along the view direction
-  // blindly walks out of the cloud and integrates nothing, which is exactly
-  // what emptied the sky the first time.
-  let mdir = vd * select(-1.0, 1.0, vUp >= 0.0);
-  let pxM = px * ${CLOUD_MARCH_PX.toFixed(4)};
+  let vT = vd - dir * vUp;
+  let lean = length(vT) / max(abs(vUp), 0.30) * ${CLOUD_THICK}.0;
+  if (lean > 1.0) {
+    let dirTop = normalize(dir - (vT / max(length(vT), 1e-6)) * (lean / (Rg + ${CLOUD_ALT}.0)));
+    let cuTop = cloudField_C(dirTop, t, cover, px).x;
+    // The tower is brighter than the base it stands on: this is the sunlit
+    // flank coming into view, not extra coverage in the same plane.
+    cu = max(cu, cuTop * 0.92);
+  }
 
-  // Optical depth along the view ray, and the coverage of the densest sample —
-  // the latter is what the existing shading terms are written against.
-  var tau = 0.0;
-  var cuMax = cu;
-  // Optical depth measured from the top of the slab down to each sample, which
-  // is the light path when the sun is high and a fair approximation of it when
-  // it is not. This is what makes a base dark because the sun could not reach
-  // it, rather than because the cloud is thick there.
+  // Opacity from *thickness*, not from coverage directly. A cumulus is a
+  // volume: it is nearly transparent where it tapers to nothing and opaque
+  // through the middle, and squaring the coverage is the cheapest stand-in for
+  // the path length through it. The previous version used the coverage itself,
+  // which gave every cloud the same flat opacity right up to a hard edge, and
+  // that is most of why the deck read as a decal.
+  let thick = pow(cu, 1.4) * 0.88;
+  let alpha = clamp(thick * 0.92 + ci * 0.28 * (1.0 - cu), 0.0, 1.0);
+  if (alpha < 0.004) { discard; }
+
+  // ── volume, for the light only ──────────────────────────────────────────
+  //
+  // Everything above this point is untouched: the coverage, the parallax lean
+  // and the opacity are the shell's, because the shell is what makes the deck
+  // read from orbit and replacing it with an integrated optical depth made the
+  // clouds fainter, not deeper. The march is added *underneath* that, and it
+  // does exactly one job — work out how much sunlight reaches each depth.
+  //
+  // That is the part a single shell genuinely cannot do. The old base shadow
+  // was 1 - 0.55 * thick, a proxy on the same number the opacity came from,
+  // so a cloud was darker underneath simply because it was more opaque. Here
+  // the light is attenuated by the cloud actually standing above it, which is
+  // why towers now shade their own flanks and the deck gains relief without
+  // gaining or losing any coverage.
+  let vdM = normalize(dirIn * (Rg + ${CLOUD_ALT}.0) - camPos);
+  let vUpM = dot(vdM, dir);
+  let spanM = ${CLOUD_THICK}.0 / max(abs(vUpM), 0.30);
+  // Climb, whichever side of the deck the camera is on: the shell sits at the
+  // base, so from above the view ray runs down out of the slab and marching
+  // along it would integrate nothing.
+  let mdir = vdM * select(-1.0, 1.0, vUpM >= 0.0);
   var tauTop = 0.0;
   for (var i = 0; i < ${CLOUD_MARCH}; i = i + 1) {
     let f01 = (f32(i) + 0.5) / ${CLOUD_MARCH}.0;
-    let p = dirIn * (Rg + ${CLOUD_ALT}.0) + mdir * (span * f01);
-    let pd = normalize(p);
-    // Height through the slab, 0 at the base and 1 at the top.
+    let p = dirIn * (Rg + ${CLOUD_ALT}.0) + mdir * (spanM * f01);
     let h = clamp((length(p) - (Rg + ${CLOUD_ALT}.0)) / ${CLOUD_THICK}.0, 0.0, 1.0);
-    // A cumulus is not a brick: it swells from a flat base and frays at the
-    // top, so density peaks low and tapers out rather than filling the slab.
+    // A cumulus swells from a flat base and frays at the top rather than
+    // filling the slab evenly.
     let vert = smoothstep(0.0, 0.14, h) * (1.0 - smoothstep(0.45, 1.0, h));
-    let d = cloudField_C(pd, t, cover, pxM).x * vert;
-    tau = tau + d * ${CLOUD_SIGMA.toFixed(6)} * dt;
-    // Everything above this sample, accumulated as the march climbs.
-    tauTop = tau;
-    cuMax = max(cuMax, d);
+    let d = cloudField_C(normalize(p), t, cover, px * ${CLOUD_MARCH_PX.toFixed(4)}).x * vert;
+    tauTop = tauTop + d * ${CLOUD_SIGMA.toFixed(6)} * (spanM / ${CLOUD_MARCH}.0);
   }
-
-  // Coverage the rest of the shading reads. The march integrates the whole
-  // column, so a tapering edge now genuinely has less of it than a core.
-  cu = clamp(cuMax + tau * 0.25, 0.0, 1.0);
 
   // ── shading ─────────────────────────────────────────────────────────────
   let wp = dir * (Rg + ${CLOUD_ALT}.0);
@@ -169,11 +180,11 @@ fn cloudShade(dirIn: vec3<f32>, camPos: vec3<f32>, sunDir: vec3<f32>,
   // proxy for depth into the cloud, and the effect is strongest where the sun
   // is high because that is when the path to the base is longest.
   let sunUp = max(dot(dir, sd), 0.0);
-  // Light reaching this column, from the depth above it. Beer's law again, and
-  // the sun angle lengthens the path through that depth — which is why a deck
-  // is flat and bright at noon and deeply modelled near the terminator.
+  // Beer's law on the cloud standing above this point, with the path through
+  // it lengthened as the sun drops. A deck is flat and bright at noon and
+  // deeply modelled near the terminator for exactly this reason.
   let base = exp(-tauTop * (1.4 + 2.2 * (1.0 - sunUp)));
-  col = col * (0.30 + 0.70 * base);
+  col = col * (0.34 + 0.66 * base);
 
   // ── relief: which flank faces the sun ──────────────────────────────────
   //

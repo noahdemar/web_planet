@@ -490,6 +490,23 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
   // on the ground. The normaliser stays unweighted so switching an octave off
   // low-passes the field instead of rescaling it, and the coverage threshold
   // below keeps meaning the same thing at every altitude.
+  // Each octave is *rotated*, not merely offset, and here it matters more than
+  // anywhere else it has come up.
+  //
+  // Gradient noise is exactly zero at every lattice point, so the billow |n|
+  // has a *minimum* there — a coverage hole, on a perfectly regular grid. An
+  // offset slides that grid without turning it, so eight octaves sharing one
+  // orientation put their holes on top of each other and the deck acquires a
+  // lattice of thin spots. It was invisible while the shading was a function
+  // of coverage alone. It stopped being invisible the moment the light became
+  // exp(-optical depth above), because that term is most sensitive exactly
+  // where there is least cloud: every stacked hole lit up as a hard white disc
+  // and the sky came out tiled with them.
+  //
+  // The artefact was always in the field; the new lighting only developed it.
+  // Rotating decorrelates the orientations for three dot products an octave,
+  // which is the same fix this codebase has already applied to the albedo
+  // rungs and to the bake's relief.
   var amp = 1.0;
   var frq = 11.0;
   var sum = 0.0;
@@ -499,7 +516,25 @@ fn cloudField_${s}(dir: vec3<f32>, t: f32, cover: f32, px: f32) -> vec2<f32> {
     let w = 1.0 - smoothstep(lam * 0.125, lam * 0.4, px);
     if (w > 0.004) {
       let d = drift0 * (1.0 + 0.55 * f32(i));
-      let n = noised_${s}(flow * frq + d + vec3<f32>(f32(i) * 13.7)).x;
+      // Four arbitrary rotations, cycled. They need not be orthonormal — a
+      // percent of scale error on a noise lookup is not observable — only
+      // that consecutive octaves do not share axes.
+      let k = i % 4;
+      var rf = flow;
+      if (k == 1) {
+        rf = vec3<f32>(dot(flow, vec3<f32>( 0.80,  0.36, -0.48)),
+                       dot(flow, vec3<f32>(-0.36,  0.93,  0.10)),
+                       dot(flow, vec3<f32>( 0.48,  0.08,  0.87)));
+      } else if (k == 2) {
+        rf = vec3<f32>(dot(flow, vec3<f32>( 0.62, -0.61,  0.49)),
+                       dot(flow, vec3<f32>( 0.71,  0.70, -0.02)),
+                       dot(flow, vec3<f32>(-0.33,  0.36,  0.87)));
+      } else if (k == 3) {
+        rf = vec3<f32>(dot(flow, vec3<f32>( 0.51,  0.77, -0.38)),
+                       dot(flow, vec3<f32>(-0.62,  0.64,  0.46)),
+                       dot(flow, vec3<f32>( 0.60, -0.06,  0.80)));
+      }
+      let n = noised_${s}(rf * frq + d + vec3<f32>(f32(i) * 13.7)).x;
       sum = sum + w * amp * abs(n);
     }
     norm = norm + amp;
@@ -1641,7 +1676,7 @@ export const shadeTerrain = wgslFn(/* wgsl */ `
 fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f32>,
                 lvl: vec4<f32>, sunDir: vec3<f32>, sunCol: vec3<f32>,
                 mode: f32, grid: f32, cfg3: vec4<f32>, skyView: vec4<f32>,
-                snap: vec3<f32>,
+                snap: vec3<f32>, weather: vec4<f32>,
                 shadow: f32) -> vec3<f32> {
   let n = normalize(surf.xyz);
   let hgt = surf.w;
@@ -2544,7 +2579,12 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
                                           * (1.0 - smoothstep(0.34, 0.58, mesoWet)));
   alb = mix(alb, mix(alb, temperate, 0.55), clamp(meso, 0.0, 1.0) * 0.30
                                             * smoothstep(0.20, 0.46, mesoWet));
-  alb = alb * (1.0 + meso * 0.10);
+  let orbitalBand = smoothstep(120.0, 900.0, mPerPx)
+                  * (1.0 - smoothstep(18000.0, 70000.0, mPerPx));
+  let orbitalDetail = mesoRaw * orbitalBand;
+  alb = alb * (1.0 + meso * 0.10 + orbitalDetail * 0.18);
+  alb = mix(alb, alb * vec3<f32>(0.86, 0.93, 1.05),
+            clamp(-orbitalDetail, 0.0, 1.0) * 0.16);
   let screeFade = 1.0 - smoothstep(1500.0, 12000.0, mPerPx);
   alb = mix(alb, scree, clast * smoothstep(0.24, 0.52, slopeB) * screeFade
                         * (1.0 - smoothstep(0.30, 0.60, moist)) * 0.40);
@@ -2553,7 +2593,10 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // plants actually stand cannot disagree, and instances can dissolve into
   // this without revealing an edge.
   let canopy = mix(vec3<f32>(0.036, 0.055, 0.026), vec3<f32>(0.055, 0.080, 0.032), hv);
-  alb = mix(alb, canopy, cover * (1.0 - snowLine) * 0.92);
+  let canopyDetail = clamp(1.0 + orbitalDetail * 0.58, 0.58, 1.38);
+  alb = mix(alb, canopy, clamp(cover * canopyDetail, 0.0, 1.0) * (1.0 - snowLine) * 0.92);
+  let groundWet = weather.x * (1.0 - snowLine) * (1.0 - waterMix);
+  alb = alb * mix(1.0, 0.58, groundWet);
 
   if (mode > 4.5 && mode < 5.5) {
     // Raw albedo, unlit — separates "the surface is the wrong colour" from
@@ -2569,7 +2612,15 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   let soft = smoothstep(-0.10, 0.12, dot(n2, sd));
   // Shadow attenuates only the direct term. Sky light still reaches a
   // shadowed surface, which is why real shadows are blue rather than black.
-  let direct = alb * (1.0 / 3.14159265) * sunCol * sunTr * ndl * soft * shadow * cloudLit;
+  var direct = alb * (1.0 / 3.14159265) * sunCol * sunTr * ndl * soft * shadow * cloudLit;
+  let eye = normalize(-rel);
+  let halfV = normalize(eye + sd);
+  let wetRough = mix(0.62, 0.12, groundWet);
+  let wetA2 = wetRough * wetRough * wetRough * wetRough;
+  let wetNh = max(dot(n2, halfV), 0.0);
+  let wetDen = wetNh * wetNh * (wetA2 - 1.0) + 1.0;
+  let wetSpec = wetA2 / max(3.14159265 * wetDen * wetDen, 1e-4);
+  direct = direct + sunCol * sunTr * wetSpec * groundWet * 0.055 * ndl * shadow * cloudLit;
 
   let sunUp = max(dot(up, sd), 0.0);
   // The 0.045 is skylight from air the sun has *set* on — the blue that keeps
@@ -2601,7 +2652,7 @@ fn shadeTerrain(surf: vec4<f32>, clim: vec4<f32>, camPos: vec3<f32>, rel: vec3<f
   // truncated to its first useful order: about +25% for snow, +5% for forest.
   let bounce = alb * alb * (1.0 / 3.14159265) * sunCol * sunTr * sunUp * 0.42;
 
-  var col = direct + ambient + bounce;
+  var col = direct + ambient + bounce + alb * weather.y * (0.65 + 0.35 * max(dot(n2, up), 0.0));
   // The shoreline, resolved rather than decided. waterMix is this pixel's
   // water coverage, so a pixel the waterline runs through gets the two
   // shadings in the proportion it actually contains.
