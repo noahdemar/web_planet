@@ -2,7 +2,6 @@ import {
   AdditiveBlending,
   BufferAttribute,
   BufferGeometry,
-  Color,
   DynamicDrawUsage,
   LineBasicMaterial,
   LineSegments,
