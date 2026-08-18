@@ -2893,3 +2893,21 @@ ${waveBlock('T')}
 ${biomeBlock('T')}
 ${cloudFieldBlock('T')}
 `);
+
+export const stochTriUV = wgslFn(/* wgsl */ `
+fn stochTriUV(uv: vec2<f32>, pos: vec3<f32>) -> vec2<f32> {
+  // One random 90/180/270 degree rotation per texture cell, keyed off the
+  // world position so the same cell always gets the same orientation.
+  let cell = floor(pos * 0.18);
+  let h = hash33_S(cell);
+  let r = floor(h.x * 2.0 + 2.0);
+  let a = r * 1.5707963;
+  let c = cos(a);
+  let s = sin(a);
+  let tile = floor(uv);
+  let f = fract(uv);
+  let p = f - 0.5;
+  return tile + 0.5 + vec2<f32>(p.x * c - p.y * s, p.x * s + p.y * c);
+}
+${noiseBlock('S')}
+`);

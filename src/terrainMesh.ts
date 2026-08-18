@@ -73,6 +73,7 @@ import {
   patchSurface,
   patchWater,
   shadeTerrain,
+  stochTriUV,
 } from './shaders/terrain.js';
 
 /** 0 natural · 1 LOD · 2 slope · 3 normals · 4 cover · 5 albedo · 6 climate
@@ -493,9 +494,12 @@ export class TerrainMesh {
     const triWeight = asVec3(surfV.xyz.abs().pow(4));
     const triNorm = triWeight.x.add(triWeight.y).add(triWeight.z).max(1e-5);
     const tri = (map: TerrainMaterials['albedo'], layer: unknown, pos: Vec3Node) => {
-      const tx = asVec4(texture(map, pos.yz.mul(0.18)).depth(layer as never));
-      const ty = asVec4(texture(map, pos.xz.mul(0.18)).depth(layer as never));
-      const tz = asVec4(texture(map, pos.xy.mul(0.18)).depth(layer as never));
+      const uX = asVec2(nCall(stochTriUV, { uv: pos.yz.mul(0.18), pos }));
+      const uY = asVec2(nCall(stochTriUV, { uv: pos.xz.mul(0.18), pos }));
+      const uZ = asVec2(nCall(stochTriUV, { uv: pos.xy.mul(0.18), pos }));
+      const tx = asVec4(texture(map, uX).depth(layer as never));
+      const ty = asVec4(texture(map, uY).depth(layer as never));
+      const tz = asVec4(texture(map, uZ).depth(layer as never));
       return asVec4(tx.mul(triWeight.x).add(ty.mul(triWeight.y)).add(tz.mul(triWeight.z)).div(triNorm));
     };
     const baseAlbedo = tri(materials.albedo, baseLayer, materialPos);
