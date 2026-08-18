@@ -148,14 +148,6 @@ const SPECIES: readonly SpeciesSpec[] = [
     // enough to serve both geometry bands.
     lods: [{ nodes: null }, { nodes: null }],
   },
-  {
-    name: 'broadleaf',
-    url: 'trees/tree_with_lod.glb',
-    lods: [
-      { nodes: ['Object_8', 'Object_5'] },
-      { nodes: ['Object_4', 'Object_5'] },
-    ],
-  },
 ];
 
 export interface TreeAssets {

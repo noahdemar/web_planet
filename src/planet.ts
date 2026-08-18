@@ -1262,8 +1262,8 @@ export const VEG_MODEL_MID = 110;
 export const VEG_DIST_BANDS = [VEG_MODEL_NEAR, VEG_MODEL_MID, 1800, VEG_RANGE];
 /** How many of those distances draw real geometry. */
 export const VEG_MODEL_LODS = 2;
-/** Species the models cover: 0 conifer, 1 broadleaf. Also atlas rows. */
-export const VEG_SPECIES = 2;
+/** Species the models cover: 0 conifer. Also atlas rows. */
+export const VEG_SPECIES = 1;
 /**
  * Bands drawing real geometry. The rest are impostors — and the split matters
  * outside this file, because only the geometry bands cast shadows.
@@ -1272,9 +1272,7 @@ export const VEG_MODEL_BANDS = VEG_MODEL_LODS * VEG_SPECIES;
 
 export const VEG_BANDS = [
   { name: 'near-conifer', maxDist: VEG_MODEL_NEAR, model: true, lod: 0, species: 0 },
-  { name: 'near-broadleaf', maxDist: VEG_MODEL_NEAR, model: true, lod: 0, species: 1 },
   { name: 'mid-conifer', maxDist: VEG_MODEL_MID, model: true, lod: 1, species: 0 },
-  { name: 'mid-broadleaf', maxDist: VEG_MODEL_MID, model: true, lod: 1, species: 1 },
   { name: 'far', maxDist: 1800, model: false, lod: -1, species: -1 },
   // The last band exists purely to reach 6 km. Same impostor quad as 'far'; it
   // gets its own draw and its own capacity so the 1.8–6 km annulus — 89% of the
